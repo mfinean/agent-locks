@@ -37,7 +37,8 @@ There is no daemon, nothing runs as root, and both tools use only Python's stand
 
 - **Slots for GPU and CPU work.** By default two GPU jobs and three CPU jobs run at once. Each runs in
   its own systemd scope with a memory cap and no swap, so a runaway job hits its own limit instead of
-  taking the session down.
+  taking the session down. Jobs also give way to your desktop when the CPU is busy, so it stays
+  responsive while they fill every core.
 - **Short jobs don't wait behind long ones.** `gpu-short` and `cpu-short` jobs get an extra slot of
   their own, so a linter doesn't wait an hour behind a training run. In return they are stopped at
   their limit: 15 minutes on the GPU, 2 on the CPU.
