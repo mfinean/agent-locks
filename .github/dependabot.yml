@@ -1,0 +1,7 @@
+# Opens a PR when an action the workflows use has a new version (it found the Node 20 actions late).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
