@@ -17,9 +17,11 @@ The slots are `flock` locks on `$XDG_RUNTIME_DIR/agent-gate/<lock>.<n>.lock`: `g
 the short-only slots (`gpu.3`, `cpu.4`) come after the others. A gpu-solo job takes every GPU slot.
 The job inherits its gate's locks, so it keeps its slot even if its gate is killed.
 
-The job runs as `agent-gate-<pid>.scope` with `MemoryMax` set to its kind's cap and no swap. A short
-kind's scope also has `RuntimeMaxSec`: systemd sends SIGTERM at the limit and SIGKILL 30 s later,
-whether or not the gate is still alive.
+The job runs as `agent-gate-<pid>.scope` with `MemoryMax` set to its kind's cap, no swap, and
+`CPUWeight=20`. When every core is busy, the desktop and other apps (weight 100) get five times a
+job's share of the CPU; when they're idle, the job still has the whole CPU. A short kind's scope
+also has `RuntimeMaxSec`: systemd sends SIGTERM at the limit and SIGKILL 30 s later, whether or not
+the gate is still alive.
 
 ### The rules
 

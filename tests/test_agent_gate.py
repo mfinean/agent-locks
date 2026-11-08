@@ -48,6 +48,13 @@ def test_the_job_gets_the_callers_environment_and_directory_unchanged(agate):
     assert out.read_text() == f"/x|{agate.root}|y\n"
 
 
+@pytest.mark.parametrize("kind", ["gpu", "gpu-short", "gpu-solo", "cpu", "cpu-short"])
+def test_every_job_gives_way_to_the_desktop_on_a_busy_cpu(agate, kind):
+    p = agate.start(kind, "true")
+    assert p.wait(10) == 0
+    assert "CPUWeight=20" in agate.props(p)
+
+
 @pytest.mark.parametrize(("short", "long", "limit", "cap"), [("gpu-short", "gpu", 900, "16G"), ("cpu-short", "cpu", 120, "10G")])
 def test_only_a_short_job_gets_a_time_limit_and_both_get_the_same_cap(agate, short, long, limit, cap):
     s = agate.start(short, "true")

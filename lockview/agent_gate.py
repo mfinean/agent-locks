@@ -5,7 +5,7 @@
 
 The kinds are gpu, gpu-short, gpu-solo, cpu and cpu-short. config.toml sets their numbers and
 policy.py has the rules. The job runs in a systemd user scope, agent-gate-<pid>.scope, with
-MemoryMax and no swap, and the gate exits with the job's exit code. A short kind's scope stops at
+MemoryMax, no swap and a low CPUWeight, and the gate exits with the job's exit code. A short kind's scope stops at
 its limit (SIGTERM, then SIGKILL 30 s later: exit 143 or 137), even if the gate dies.
 
 The queue is a directory of tickets, $XDG_RUNTIME_DIR/agent-gate/queue/<pid>-<tick>.json: each gate's
@@ -51,6 +51,7 @@ IN_SCOPE = re.compile(r"/agent-gate-\d+\.scope(/|$)")  # a cgroup in a gate job'
 POLL_S = float(os.environ.get("AGENT_GATE_POLL_S") or 15)
 SAY_EVERY_S = 300  # how often a waiting gate says it still waits
 STOP_GRACE_S = 30  # between a limit's SIGTERM and its SIGKILL
+CPU_WEIGHT = 20  # a job's share of a busy CPU against the desktop's apps, which weigh 100; an idle CPU is all its own
 THRASH_US = 500_000  # memory stall, in µs per second, that counts as thrashing
 THRASH_S = 3
 MAX_COMMAND = 2000
@@ -318,7 +319,7 @@ def run(t: Ticket, cfg: policy.Config, fds: list[int], slots: list[str], log: Lo
     say(f"{t.kind} after {waited:.0f}s: {' '.join(t.command)}")
     log("start", unit=t.unit, slots=slots)
     peak_file = RUN_DIR / f"peak.{t.pid}"
-    props = ["-p", f"MemoryMax={k.mem}", "-p", "MemorySwapMax=0"]
+    props = ["-p", f"MemoryMax={k.mem}", "-p", "MemorySwapMax=0", "-p", f"CPUWeight={CPU_WEIGHT}"]
     if k.limit:
         props += ["-p", f"RuntimeMaxSec={k.limit}", "-p", f"TimeoutStopSec={STOP_GRACE_S}"]
     began = time.monotonic()
