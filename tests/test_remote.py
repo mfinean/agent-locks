@@ -52,6 +52,14 @@ def test_only_heavy_jobs_are_sent_with_their_use_summed_and_their_heaviest_proce
     assert jobs[12]["ssh"] is None and jobs[12]["cwd"] == ""  # nothing to read under /nonexistent
 
 
+def test_a_processs_cores_are_its_cpu_ticks_over_the_seconds_between_readings():
+    tick = probe.CLK_TCK
+    before = {1: {"ticks": 0, "start": 5}, 2: {"ticks": 0, "start": 5}}
+    now = {1: {"ticks": 3 * tick, "start": 5}, 2: {"ticks": tick, "start": 9}, 3: {"ticks": tick, "start": 9}}
+    assert probe.cores_used(before, now, 2.0) == {1: 1.5}  # 2 is another process under a reused pid, 3 is new
+    assert probe.cores_used(before, now, 0.0) == {}
+
+
 def test_the_probe_reads_this_process_and_an_ssh_login_from_the_environment(tmp_path):
     me = probe.read_procs()[os.getpid()]
     argv = [a.decode() for a in Path("/proc/self/cmdline").read_bytes().rstrip(b"\0").split(b"\0")]

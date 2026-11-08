@@ -1,4 +1,5 @@
 import os
+import time
 
 import pytest
 
@@ -95,6 +96,54 @@ def _snap(parents, cgroups=None):
     """A process table: pid -> parent pid, with optional cgroups."""
     cgroups = cgroups or {}
     return procs.Snapshot({pid: procs.Proc(pid, ppid, "x", ("x",), pid, cgroups.get(pid, "")) for pid, ppid in parents.items()}, 0.0)
+
+
+def test_a_snapshot_reads_each_processs_cpu_time_memory_and_session():
+    snap = procs.Snapshot.take()
+    me = snap.procs[os.getpid()]
+    assert me.ticks >= 0 and me.rss > 2**20 and me.sid == os.getsid(0)
+    assert abs(snap.taken - time.time()) < 5
+
+
+# Processes above the kernel's largest pid (2**22), so none of them is a real process to read.
+P = 5_000_000
+SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/agent-gate-21.scope"
+
+
+def _machine(seconds_in=0.0):
+    """This machine after `seconds_in` seconds of: a Claude session running a sweep with two workers (3 cores
+    in all) outside the gate, a gated build (4 cores), a light pytest run, and a browser no session started."""
+    def proc(n, ppid, comm, argv, cores=0.0, rss=0, cgroup=""):
+        return procs.Proc(P + n, P + ppid if ppid else 1, comm, tuple(argv), 100 * procs.CLK_TCK, cgroup, {}, P + n,
+                          round(cores * seconds_in * procs.CLK_TCK), rss)
+    table = [
+        proc(10, 0, "claude", ["claude"], rss=3 * 2**30),  # the session itself: heavy, but not a job
+        proc(11, 10, "bash", ["/bin/bash", "-c", "python sweep.py"]),
+        proc(12, 11, "python", ["python", "sweep.py"], cores=1.0, rss=2**28),
+        proc(13, 12, "python", ["python", "sweep.py"], cores=1.0, rss=2**28),
+        proc(14, 12, "python", ["python", "sweep.py"], cores=1.0, rss=2**28),
+        proc(20, 10, "bash", ["/bin/bash", "-c", "agent-gate cpu -- make"]),
+        proc(21, 20, "python3", ["/usr/bin/python3", "-I", "agent-gate", "cpu", "--", "make"]),
+        proc(22, 21, "make", ["make"], cores=4.0, rss=2**30, cgroup=SCOPE),
+        proc(30, 0, "chrome", ["chrome"], cores=1.0, rss=3 * 2**30),
+        proc(40, 10, "bash", ["/bin/bash", "-c", "pytest -q"], cores=0.2),
+    ]
+    return procs.Snapshot({p.pid: p for p in table}, 1000.0, 1_000_000.0 + seconds_in)
+
+
+SESSIONS = {P + 10: owners.Session(P + 10, "rover-30", "id", "rover", "", "busy")}
+
+
+def test_outside_the_gate_is_each_heavy_job_a_claude_session_runs_without_it():
+    jobs = gate.outside(_machine(seconds_in=3.0), _machine(), {}, SESSIONS)
+    assert [(j["pid"], j["procs"], j["cpu"], j["owner"]["session"], j["via"]) for j in jobs] == [
+        (P + 11, 4, 3.0, "rover-30", "Claude session rover-30")]
+    assert jobs[0]["start"] == 1100.0 and jobs[0]["rss"] == 3 * 2**28
+
+
+def test_outside_the_gate_without_a_previous_sample_counts_memory_and_vram_alone():
+    assert gate.outside(_machine(seconds_in=3.0), None, {}, SESSIONS) == []
+    assert [j["vram_mb"] for j in gate.outside(_machine(seconds_in=3.0), None, {P + 13: 900}, SESSIONS)] == [900]
 
 
 def _running(pid, kind, slot, vram_mb=0):

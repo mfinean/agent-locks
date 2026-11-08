@@ -129,6 +129,7 @@ default browser.
 | the gate's tickets | each job's kind, state, slots, queue time and owner, and whether it runs an older copy of the gate |
 | each job's cgroup | memory now, its peak and its cap; VRAM comes from `nvidia-smi` per process |
 | `/proc/locks` and open file descriptors | holders and waiters of other exclusive `flock` locks |
+| each process's `/proc/<pid>/stat` | its CPU time, memory and session, for heavy jobs outside the gate |
 | the gate's event log | each finished job's kind, slots, waits by reason, exit code and peak memory, two weeks back |
 | `journalctl --user` | every finished `systemd-run` scope: start, end, CPU time and OOM kills |
 | `~/.claude/sessions/*.json` | which Claude Code session started a process |
@@ -149,6 +150,14 @@ A job's owner is its session, its project and its worktree.
 
 The gate records the owner when the job queues. For a run it didn't log, lockview uses what it saw
 while the job ran (kept in `~/.local/state/lockview/observed.json`), or else the job's directory.
+
+### Jobs outside the gate
+
+lockview applies the probe's test (see [Other machines](#other-machines)) to this machine too. A job
+is a process tree that something started: the topmost process below an init, sshd, tmux, screen, a
+Claude session or an interactive shell, with its descendants. It is heavy if it uses a GPU, half a
+core or 2 GB, with its CPU use measured between two samples. Processes in a gate job's scope are left
+out, and so is any job no Claude session started, such as the desktop's own apps.
 
 ### Estimates and predicted starts
 
@@ -221,6 +230,8 @@ using a GPU, half a core or 2 GB. A job's owner is, in order:
   guessed kind. The timeline puts it in a free slot, marked `?`, which shows how busy the slots were
   but not which slot it had.
 - **Very short scopes** can end without the journal's CPU-time line, and are left out.
+- **Detached jobs here.** A job started with `setsid nohup … &` leaves its session's process tree,
+  so it isn't listed outside the gate.
 - **Detached remote jobs.** lockview sees a job's ssh client only if the client is still running at
   one of its readings. It remembers clients for a day, which covers `setsid nohup … &`.
 - **Other machines' history** isn't kept: lockview shows what runs there now.
