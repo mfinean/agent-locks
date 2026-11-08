@@ -1,4 +1,5 @@
-"""One read of /proc: every process's parent, command line, start time, cgroup and open lock files.
+"""One read of /proc: every process's parent, command line, start time, CPU time, memory, cgroup and open
+lock files.
 
 Everything here only reads. Opening /proc/<pid>/fd/<n> would open the target itself, so lock files
 are found by readlink and never opened.
@@ -7,9 +8,11 @@ are found by readlink and never opened.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+PAGE = os.sysconf("SC_PAGE_SIZE")
 
 
 def boot_time() -> float:
@@ -29,6 +32,9 @@ class Proc:
     start_ticks: int
     cgroup: str = ""
     lock_fds: dict[str, tuple[int, int]] = field(default_factory=dict)  # path -> (st_dev, st_ino)
+    sid: int = 0  # its session's leader
+    ticks: int = 0  # CPU time so far, user and system, in clock ticks
+    rss: int = 0  # bytes
 
     def started_at(self, btime: float) -> float:
         return btime + self.start_ticks / CLK_TCK
@@ -38,13 +44,16 @@ class Proc:
         return " ".join(self.argv)
 
 
-def read_stat(pid: int | str) -> tuple[int, str, int]:
-    """(ppid, comm, start ticks) from /proc/<pid>/stat."""
+def _stat(pid: int | str) -> tuple[str, list[str]]:
+    """comm, and the fields after it, from /proc/<pid>/stat: [0] is field 3 (state), so field n is [n - 3]."""
     with open(f"/proc/{pid}/stat") as f:
         data = f.read()
-    comm = data[data.index("(") + 1 : data.rindex(")")]
-    rest = data[data.rindex(")") + 2 :].split()
-    # rest[0] is field 3 (state): ppid is field 4, starttime field 22.
+    return data[data.index("(") + 1 : data.rindex(")")], data[data.rindex(")") + 2 :].split()
+
+
+def read_stat(pid: int | str) -> tuple[int, str, int]:
+    """(ppid, comm, start ticks) from /proc/<pid>/stat."""
+    comm, rest = _stat(pid)
     return int(rest[1]), comm, int(rest[19])
 
 
@@ -70,9 +79,10 @@ def _lock_fds(pid: str) -> dict[str, tuple[int, int]]:
 
 
 class Snapshot:
-    def __init__(self, procs: dict[int, Proc], btime: float):
+    def __init__(self, procs: dict[int, Proc], btime: float, taken: float = 0.0):
         self.procs = procs
         self.btime = btime
+        self.taken = taken  # when it was read, for CPU use between two snapshots
         self.children: dict[int, list[int]] = {}
         for p in procs.values():
             self.children.setdefault(p.ppid, []).append(p.pid)
@@ -80,19 +90,22 @@ class Snapshot:
     @classmethod
     def take(cls) -> Snapshot:
         procs: dict[int, Proc] = {}
+        taken = time.time()
         for name in os.listdir("/proc"):
             if not name.isdigit():
                 continue
             try:
-                ppid, comm, start = read_stat(name)
+                comm, rest = _stat(name)
                 with open(f"/proc/{name}/cmdline", "rb") as f:
                     argv = tuple(a.decode(errors="replace") for a in f.read().split(b"\0") if a)
                 with open(f"/proc/{name}/cgroup") as f:
                     cgroup = f.read().strip().split("::", 1)[-1]
             except (OSError, ValueError, IndexError):
                 continue  # exited mid-read, or a kernel thread
-            procs[int(name)] = Proc(int(name), ppid, comm, argv, start, cgroup, _lock_fds(name))
-        return cls(procs, boot_time())
+            # ppid is field 4, session 6, utime and stime 14 and 15, starttime 22, rss 24 (pages).
+            procs[int(name)] = Proc(int(name), int(rest[1]), comm, argv, int(rest[19]), cgroup, _lock_fds(name),
+                                    int(rest[3]), int(rest[11]) + int(rest[12]), int(rest[21]) * PAGE)
+        return cls(procs, boot_time(), taken)
 
     def get(self, pid: int) -> Proc | None:
         return self.procs.get(pid)

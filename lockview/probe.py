@@ -120,6 +120,16 @@ def ssh_connection(pid, root="/proc"):
     return None
 
 
+def cores_used(before, procs, seconds):
+    """pid -> cores each process used since `before`, a reading `seconds` older. A pid in both readings with
+    another start time is another process."""
+    span = seconds * CLK_TCK
+    if span <= 0:
+        return {}
+    return {pid: max(0, p["ticks"] - before[pid]["ticks"]) / span for pid, p in procs.items()
+            if pid in before and before[pid]["start"] == p["start"]}
+
+
 def jobs(procs, cpu, vram, sessions, user_of, root="/proc"):
     """The heavy jobs. cpu: pid -> cores over the last interval; vram: pid -> MiB on any GPU."""
     groups = {}
@@ -225,9 +235,7 @@ def main(interval):
     while True:
         time.sleep(interval)
         procs, cpu1, t1 = read_procs(), cpu_times(), time.time()
-        span = (t1 - t0) * CLK_TCK
-        cores = {pid: max(0, p["ticks"] - before[pid]["ticks"]) / span for pid, p in procs.items()
-                 if pid in before and before[pid]["start"] == p["start"]}
+        cores = cores_used(before, procs, t1 - t0)
         cards, vram, gpu_error = gpus()
         sessions = load_sessions(procs, sessions_dir)
         mem = meminfo()

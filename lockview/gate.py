@@ -11,7 +11,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import agent_gate, config, owners, policy, procs, resources
+from . import agent_gate, config, owners, policy, probe, procs, resources
 from .locks import Lock
 from .policy import Config
 from .procs import Snapshot
@@ -140,6 +140,34 @@ def find_programs(snap: Snapshot, sessions: dict[int, owners.Session], patterns:
             continue
         gated = bool(agent_gate.IN_SCOPE.search(p.cgroup))  # as the gate counts it: it runs in a gate's scope
         out.append(ProgramProc(pid, gated, owners.owner_of(pid, snap, sessions), p.cmdline[:300]))
+    return out
+
+
+def _probe_view(snap: Snapshot) -> dict[int, dict]:
+    """The snapshot's processes outside every gate job's scope, in probe.py's form. Kernel threads have no argv."""
+    return {p.pid: {"ppid": p.ppid, "sid": p.sid, "comm": p.comm, "argv": list(p.argv), "uid": None, "ticks": p.ticks,
+                    "start": p.start_ticks, "rss": p.rss}
+            for p in snap.procs.values() if p.argv and not agent_gate.IN_SCOPE.search(p.cgroup)}
+
+
+def outside(snap: Snapshot, before: Snapshot | None, vram_mb: dict[int, int], sessions: dict[int, owners.Session]) -> list[dict]:
+    """The heavy jobs Claude sessions run outside the gate.
+
+    The test is the one lockview applies to other machines (probe.py): a process tree that something started,
+    using a GPU, half a core or 2 GB. Gate jobs' scopes are left out, and so is any job no Claude session
+    started, such as the desktop's own apps. before: the previous sample's snapshot, for CPU use; without
+    it, only memory and VRAM count.
+    """
+    view = _probe_view(snap)
+    cpu = probe.cores_used(_probe_view(before), view, snap.taken - before.taken) if before else {}
+    out = []
+    for j in probe.jobs(view, cpu, vram_mb, {}, lambda _uid: ""):
+        if probe.is_boundary(j["pid"], view[j["pid"]]):
+            continue  # a session, a shell or a terminal itself, rather than a job one started
+        owner = owners.owner_of(j["pid"], snap, sessions)
+        if owner.session:
+            out.append({**j, "start": snap.btime + j["start"] / procs.CLK_TCK, "owner": owner.as_dict(),
+                        "via": f"Claude session {owner.session}"})
     return out
 
 

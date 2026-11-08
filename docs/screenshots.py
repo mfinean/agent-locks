@@ -193,12 +193,21 @@ def state(now: float) -> dict:
         "sessions": [{"pid": 3100 + i, "name": name, "session_id": f"00000000-0000-4000-8000-00000000000{i}", "project": project,
                       "worktree": "", "status": "busy" if i < 4 else "waiting"} for i, (name, project) in enumerate(SESSIONS.items())],
         "gate": {**gs.as_dict(), "gates": server.gate_jobs(gs, est, now)},
+        "outside": [_outside(now)],
         "locks": held,
         "history": server.history_rows(finished, [], {}, gs, now),
         "journal_error": "", "events_error": "", "machine_log_error": "",
         "capacity": {h: capacity.report(finished, log, gs, now, h) for h in server.CAPACITY_HOURS},
         "remotes": {"config": "~/.config/agent-locks/config.toml", "hosts": [_remote(now)]},
     }
+
+
+def _outside(now: float) -> dict:
+    """A sweep a session runs here without the gate."""
+    worker = {"command": "python -m planner.sweep --scenarios 400 --workers 6", "cpu": 0.98, "rss": GB // 2, "vram_mb": 0}
+    return {"pid": 52304, "user": "", "command": "python -m planner.sweep --scenarios 400 --workers 6", "start": now - 520,
+            "cpu": 5.9, "rss": 3 * GB + GB // 4, "vram_mb": 0, "procs": 7, "cwd": f"{HOME}/planner", "session": None, "ssh": None,
+            "top": [{"pid": 52306 + i, **worker} for i in range(5)], "owner": _owner("planner-3"), "via": "Claude session planner-3"}
 
 
 def _remote(now: float) -> dict:
@@ -263,7 +272,8 @@ def chrome(url: str, *args: str) -> str:
                                "--virtual-time-budget=4000", *args, url], capture_output=True, text=True, timeout=120, check=True).stdout
 
 
-CARDS = {"Gate queue": "queue", "Slots and locks over time": "timeline", "Gate capacity": "capacity", "Other machines": "machines"}
+CARDS = {"Gate queue": "queue", "Outside the gate": "outside", "Slots and locks over time": "timeline", "Gate capacity": "capacity",
+         "Other machines": "machines"}
 CARD_RADIUS = 10  # px, as the page's .card
 
 

@@ -149,6 +149,10 @@ details summary { cursor: pointer; color: var(--ink-2); }
     <div style="overflow-x:auto"><table id="queue"></table></div>
   </section>
   <section class="card">
+    <div class="card-head"><h2>Outside the gate</h2><span class="note">jobs Claude sessions run here without agent-gate · using a GPU, half a core or 2 GB</span></div>
+    <div id="outside"></div>
+  </section>
+  <section class="card">
     <div class="card-head"><h2>Other machines</h2><span class="note">over ssh · jobs using a GPU, half a core or 2 GB</span></div>
     <div id="remotes"></div>
   </section>
@@ -575,19 +579,30 @@ function remoteTiles(r) {
   if (r.pressure) out.push(tile("Memory pressure", `${r.pressure.full.toFixed(1)}%`, meter(r.pressure.full / 100), `full, system-wide · some ${r.pressure.some.toFixed(1)}%`));
   return h("div", { class: "tiles" }, out);
 }
-function remoteJobs(hs) {
-  const r = hs.reading, me = r.home.split("/").pop(), now = S.now;
-  if (!r.jobs.length) return h("div", { class: "muted" }, "Nothing heavy running.");
+// Heavy jobs, as probe.py finds them: on another machine, or on this one outside the gate.
+// t: when they were read; me: the user to leave unnamed (null to name none).
+function jobsTable(jobs, t, keyOf, me) {
+  const now = S.now;
   const head = h("tr", {}, ["Owner", "Job", "Started", "Running", "CPU", "Memory", "VRAM"].map((c, i) => h("th", { class: i >= 2 ? "num" : "" }, c)));
-  return h("div", { style: "overflow-x:auto" }, h("table", {}, head, r.jobs.map((j) =>
-    h("tr", { class: "row", onclick: () => openDetail(`remote:${hs.alias}:${j.pid}`) },
-      h("td", {}, ownerCell(j.owner), j.user !== me ? h("div", { class: "muted" }, j.user) : null),
+  return h("div", { style: "overflow-x:auto" }, h("table", {}, head, jobs.map((j) =>
+    h("tr", { class: "row", onclick: () => openDetail(keyOf(j)) },
+      h("td", {}, ownerCell(j.owner), me && j.user !== me ? h("div", { class: "muted" }, j.user) : null),
       h("td", {}, h("div", { class: "job mono", title: j.command }, j.command), j.procs > 1 ? h("div", { class: "muted" }, `${j.procs} processes`) : null),
       h("td", { class: "num" }, clock(j.start, now)),
-      h("td", { class: "num" }, dur(r.t - j.start)),
+      h("td", { class: "num" }, dur(t - j.start)),
       h("td", { class: "num" }, `${j.cpu.toFixed(1)} cores`),
       h("td", { class: "num" }, gb(j.rss)),
       h("td", { class: "num" }, j.vram_mb ? `${(j.vram_mb / 1024).toFixed(1)} GB` : h("span", { class: "muted" }, "—"))))));
+}
+function remoteJobs(hs) {
+  const r = hs.reading;
+  if (!r.jobs.length) return h("div", { class: "muted" }, "Nothing heavy running.");
+  return jobsTable(r.jobs, r.t, (j) => `remote:${hs.alias}:${j.pid}`, r.home.split("/").pop());
+}
+function renderOutside() {
+  const jobs = S.outside || [];
+  $("#outside").replaceChildren(jobs.length ? jobsTable(jobs, S.now, (j) => `outside:${j.pid}`, null)
+    : h("div", { class: "muted" }, "Nothing heavy outside the gate."));
 }
 function renderRemotes() {
   const R = S.remotes, box = $("#remotes");
@@ -711,6 +726,7 @@ function findItem(key) {
   if (kind === "gate") { const g = S.gate.gates.find((g) => `gate:${g.pid}` === key); return g && { kind, g }; }
   if (kind === "hist") { const r = S.history.find((r) => `hist:${r.unit}:${r.start}` === key); return r && { kind, r }; }
   if (kind === "lock") { for (const lk of S.locks) for (const p of [...lk.holders, ...lk.waiters]) if (`lock:${lk.path}:${p.pid}` === key) return { kind, lk, p }; }
+  if (kind === "outside") { const j = (S.outside || []).find((j) => `outside:${j.pid}` === key); return j && { kind, j }; }
   if (kind === "remote") { for (const hs of S.remotes.hosts) for (const j of (hs.reading && hs.reading.jobs) || []) if (`remote:${hs.alias}:${j.pid}` === key) return { kind, hs, j }; }
   return null;
 }
@@ -760,13 +776,14 @@ function renderDetail() {
     if (p.predicted_end) row("Ends", `≈ ${clock(p.predicted_end, now)}`);
     if (p.predicted) row("Predicted", `${clock(p.predicted.start, now)} → ${clock(p.predicted.end, now)} (flock wakes waiters in no fixed order)`);
     if (p.stats) row("Memory", `${gb(p.stats.memory_current)} now, peak ${gb(p.stats.memory_peak)}, cap ${gb(p.stats.memory_max)}`);
-  } else if (it.kind === "remote") {
-    const j = it.j, r = it.hs.reading; title = `${it.hs.alias} · pid ${j.pid}`; command = j.command;
-    row("Machine", `${it.hs.alias}${r.host !== it.hs.alias ? ` (${r.host})` : ""}`);
+  } else if (it.kind === "remote" || it.kind === "outside") {
+    const j = it.j, r = it.hs && it.hs.reading, t = r ? r.t : now;
+    title = `${r ? it.hs.alias : "outside the gate"} · pid ${j.pid}`; command = j.command;
+    if (r) row("Machine", `${it.hs.alias}${r.host !== it.hs.alias ? ` (${r.host})` : ""}`);
     row("Owner", ownerCell(j.owner));
     row("Started by", j.via || "unknown: no Claude session there runs it, and no ssh connection from here started it");
-    row("User", j.user);
-    row("Started", `${clock(j.start, now)} (${dur(r.t - j.start)} ago)`);
+    if (r) row("User", j.user);
+    row("Started", `${clock(j.start, now)} (${dur(t - j.start)} ago)`);
     row("Using", `${j.cpu.toFixed(1)} cores · ${gb(j.rss)}${j.vram_mb ? ` · VRAM ${(j.vram_mb / 1024).toFixed(1)} GB` : ""} · ${j.procs} process${j.procs > 1 ? "es" : ""}`);
     row("Directory", j.cwd ? h("span", { class: "mono" }, home(j.cwd)) : null);
     row("Heaviest", h("ul", { class: "reasons" }, j.top.map((p) => h("li", {},
@@ -798,7 +815,7 @@ function render() {
   if (!S) return;
   renderBanners();
   if (S.error) return;
-  renderTiles(); renderTimeline(); renderQueue(); renderRemotes(); renderLocks(); renderHistory(); renderCapacity(); renderDetail();
+  renderTiles(); renderTimeline(); renderQueue(); renderOutside(); renderRemotes(); renderLocks(); renderHistory(); renderCapacity(); renderDetail();
 }
 renderRange(); renderCapRange(); applyTheme();
 window.addEventListener("resize", () => S && !S.error && renderTimeline());

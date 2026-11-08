@@ -52,7 +52,8 @@ There is no daemon, nothing runs as root, and both tools use only Python's stand
 - **It knows whose job it is.** Each job records the Claude Code session that queued it, and its
   project and worktree from git.
 - **A live view.** lockview shows why each job waits, how long it should take from past runs, when it
-  should start, every slot over time, how busy the gate has been, and jobs on other machines over ssh.
+  should start, every slot over time, how busy the gate has been, heavy jobs that skip the gate, and
+  jobs on other machines over ssh.
 
 ## Install
 
@@ -168,6 +169,14 @@ should start and end, its memory, and every reason it still waits.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/queue-dark.png">
   <img src="docs/images/queue-light.png" alt="The gate queue: running and waiting jobs with owners, estimates, predicted starts and the reasons they wait">
+</picture>
+
+Heavy jobs that a Claude session runs without the gate, and which session started each. When the
+machine feels slow, this is usually why.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/outside-dark.png">
+  <img src="docs/images/outside-light.png" alt="Outside the gate: a sweep a session runs without agent-gate, using six cores">
 </picture>
 
 Every slot over the past hours, coloured by project. Outlined bars are what is still to come.
