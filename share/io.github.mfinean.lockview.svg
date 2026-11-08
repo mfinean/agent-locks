@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Locks &amp; Leases</title>
+  <rect x="6" y="6" width="116" height="116" rx="26" fill="#1d2430"/>
+  <path d="M43 60V44a21 21 0 0 1 42 0v16" fill="none" stroke="#c9c6bc" stroke-width="11" stroke-linecap="round"/>
+  <rect x="24" y="55" width="80" height="56" rx="12" fill="#f4f2ec"/>
+  <rect x="34" y="65" width="42" height="9" rx="4.5" fill="#2a78d6"/>
+  <rect x="78" y="65.75" width="16" height="7.5" rx="3.75" fill="#2a78d6" fill-opacity=".18" stroke="#2a78d6" stroke-width="1.5"/>
+  <rect x="34" y="79" width="24" height="9" rx="4.5" fill="#eb6834"/>
+  <rect x="60" y="79.75" width="34" height="7.5" rx="3.75" fill="#eb6834" fill-opacity=".18" stroke="#eb6834" stroke-width="1.5"/>
+  <rect x="34" y="93" width="60" height="9" rx="4.5" fill="#1baf7a"/>
+</svg>

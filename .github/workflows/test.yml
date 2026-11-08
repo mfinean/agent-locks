@@ -1,0 +1,23 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # agent-gate runs on /usr/bin/python3, which needs 3.11 or later for tomllib: 24.04 has 3.12.
+    # The matrix's Python runs lockview's tests in-process.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest==8.3.5 ruff==0.16.5
+      - run: make lint
+      - run: make test

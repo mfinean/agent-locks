@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Locks & Leases
+GenericName=Job queue monitor
+Comment=The gate's queue, agents' locks and other machines' jobs, with time estimates
+Exec=@BIN@
+Icon=io.github.mfinean.lockview
+Terminal=false
+Categories=System;Monitor;
+Keywords=agent-gate;gate;lock;queue;gpu;flock;
+StartupNotify=true
+StartupWMClass=lockview
+SingleMainWindow=true

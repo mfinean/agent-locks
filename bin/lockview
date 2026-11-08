@@ -1,0 +1,4 @@
+#!/bin/sh
+# Runs with the system python3: it has the GTK and WebKit bindings (python3-gi) a venv would not.
+here=$(dirname "$(readlink -f "$0")")
+PYTHONPATH="$here/..${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m lockview.app "$@"

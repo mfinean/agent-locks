@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs with the system python3, whatever environment the job is started from. -I keeps the caller's
+# PYTHONPATH out of the gate's imports, and the gate passes the environment to the job unchanged.
+# exec keeps the pid the caller started, which is the gate's pid in its queue, log and `status`.
+# "$0" passes on the name it was run as, for its usage message: a link may give the gate another name.
+here=$(dirname "$(readlink -f "$0")")
+exec /usr/bin/python3 -I -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from lockview.agent_gate import main
+sys.exit(main(sys.argv[3:], os.path.basename(sys.argv[2])))' "$here/.." "$0" "$@"

@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Locks &amp; Leases</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f3f2ee;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s0: #2a78d6; --s1: #eb6834; --s2: #1baf7a; --s3: #eda100; --s4: #e87ba4; --s5: #008300; --s6: #6250d6; --s7: #e34948;
+  --s-none: #a3a29b;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-ink: #006300; --warning-ink: #8a5a00; --critical-ink: #b42323;
+  --accent: #2a78d6; --accent-track: #cde2fb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s0: #3987e5; --s1: #d95926; --s2: #199e70; --s3: #c98500; --s4: #d55181; --s5: #008300; --s6: #9085e9; --s7: #e66767;
+    --s-none: #6b6a64;
+    --good-ink: #0ca30c; --warning-ink: #fab219; --critical-ink: #e66767;
+    --accent: #3987e5; --accent-track: #184f95;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --s0: #3987e5; --s1: #d95926; --s2: #199e70; --s3: #c98500; --s4: #d55181; --s5: #008300; --s6: #9085e9; --s7: #e66767;
+  --s-none: #6b6a64;
+  --good-ink: #0ca30c; --warning-ink: #fab219; --critical-ink: #e66767;
+  --accent: #3987e5; --accent-track: #184f95;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); }
+body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.mono { font-family: ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
+.muted { color: var(--muted); } .ink2 { color: var(--ink-2); }
+header.bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px; padding: 10px 20px;
+  background: var(--page); border-bottom: 1px solid var(--grid); }
+header h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.spacer { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--ring); border-radius: 7px; overflow: hidden; }
+.seg button, .btn { font: inherit; color: var(--ink-2); background: var(--surface); border: 0; padding: 4px 10px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--ring); }
+.seg button[aria-pressed="true"] { color: var(--ink); background: var(--surface-2); font-weight: 600; }
+.btn { border: 1px solid var(--ring); border-radius: 7px; }
+main { padding: 16px 20px 40px; display: grid; gap: 16px; max-width: 1800px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 13px; font-weight: 600; margin: 0; }
+.card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.card-head .note { color: var(--muted); }
+.banner { border-radius: 8px; padding: 8px 12px; border: 1px solid var(--ring); background: var(--surface); }
+.banner.critical { border-left: 4px solid var(--critical); }
+.banner.warning { border-left: 4px solid var(--warning); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 10px; padding: 12px 14px; }
+.tile .label { color: var(--ink-2); }
+.tile .value { font-size: 24px; font-weight: 600; margin: 2px 0 4px; }
+.tile .sub { color: var(--muted); }
+.meter { position: relative; height: 6px; border-radius: 3px; background: var(--accent-track); margin: 6px 0 4px; }
+.meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+.meter > b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink-2); }
+.meter.warning > i { background: var(--warning); } .meter.critical > i { background: var(--critical); }
+.status { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.status.good { color: var(--good-ink); } .status.warning { color: var(--warning-ink); } .status.critical { color: var(--critical-ink); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.key-run { display: inline-block; width: 18px; height: 10px; border-radius: 3px; }
+.key-est { display: inline-block; width: 18px; height: 10px; border-radius: 3px; border: 1.5px solid var(--ink-2); background: color-mix(in srgb, var(--ink-2) 18%, transparent); }
+.timeline { position: relative; overflow-x: auto; }
+.timeline svg { display: block; }
+.timeline text { fill: var(--muted); font-size: 11px; }
+.timeline .lane-label { fill: var(--ink-2); font-size: 12px; }
+.timeline .bar-label { font-size: 11px; pointer-events: none; }
+.timeline .hit { cursor: pointer; }
+.timeline .hit:hover rect.mark, .timeline .hit:focus rect.mark { filter: brightness(1.12); }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td { padding: 6px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+tr.row { cursor: pointer; } tr.row:hover td { background: var(--surface-2); }
+tr.group td { color: var(--muted); font-weight: 600; padding-top: 12px; border-bottom: 0; background: none !important; cursor: default; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 5px; border: 1px solid var(--ring); color: var(--ink-2); font-size: 11px; white-space: nowrap; }
+.tag.warn { border-color: var(--warning); color: var(--warning-ink); }
+.tag.crit { border-color: var(--critical); color: var(--critical-ink); }
+.owner { display: inline-flex; gap: 6px; align-items: baseline; }
+.owner .sw { transform: translateY(1px); }
+.job { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reasons { margin: 0; padding-left: 16px; color: var(--ink-2); }
+.reasons.flags { color: var(--warning-ink); }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 3px 9px; border: 1px solid var(--ring); border-radius: 999px; color: var(--ink-2); }
+.minim { display: inline-block; vertical-align: middle; width: 54px; height: 5px; border-radius: 3px; background: var(--accent-track); position: relative; margin-left: 6px; }
+.minim > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--accent); }
+.minim.warning > i { background: var(--warning); } .minim.critical > i { background: var(--critical); }
+.tip { position: fixed; z-index: 20; pointer-events: none; max-width: 420px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+.tip .v { font-weight: 600; } .tip .k { color: var(--muted); }
+aside#detail { position: fixed; z-index: 10; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); overflow: auto; background: var(--surface);
+  border-left: 1px solid var(--ring); box-shadow: -12px 0 32px rgba(0,0,0,.15); padding: 16px 18px; }
+aside#detail h3 { margin: 0 0 8px; font-size: 14px; }
+aside#detail dl { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin: 0; }
+aside#detail dt { color: var(--muted); } aside#detail dd { margin: 0; overflow-wrap: anywhere; }
+aside#detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-2); padding: 8px; border-radius: 6px; margin: 4px 0 0; }
+.stale main { opacity: .55; }
+.remote + .remote { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--grid); }
+.remote-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.remote-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.remote .tiles { margin-bottom: 10px; }
+.remote.stale-host .tiles, .remote.stale-host table { opacity: .55; }
+details summary { cursor: pointer; color: var(--ink-2); }
+@media (max-width: 720px) { header.bar, main { padding-left: 16px; padding-right: 16px; } .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>Locks &amp; leases</h1>
+  <span id="status" class="muted">connecting…</span>
+  <div class="spacer"></div>
+  <span class="muted hide-sm">past</span>
+  <div class="seg" id="range" role="group" aria-label="Past hours shown"></div>
+  <button class="btn" id="theme" title="Theme">Auto</button>
+</header>
+<main>
+  <div id="banners" style="display:grid;gap:8px"></div>
+  <section class="tiles" id="tiles" aria-label="Summary"></section>
+  <section class="card">
+    <div class="card-head">
+      <h2>Slots and locks over time</h2>
+      <span class="note">solid: ran or running · outlined: estimated remainder or predicted run · colour: project</span>
+      <div class="spacer"></div>
+      <div id="legend" class="legend"></div>
+    </div>
+    <div id="timeline" class="timeline"></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Gate queue</h2><span class="note" id="gate-note"></span></div>
+    <div id="owners" class="chips"></div>
+    <div style="overflow-x:auto"><table id="queue"></table></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Other machines</h2><span class="note">over ssh · jobs using a GPU, half a core or 2 GB</span></div>
+    <div id="remotes"></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Other locks</h2><span class="note">exclusive flock locks agents hold around jobs</span></div>
+    <div id="locks"></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Finished gate jobs</h2><span class="note" id="hist-note"></span></div>
+    <div style="overflow-x:auto"><table id="history"></table></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Gate capacity</h2><span class="note" id="cap-note"></span><div class="spacer"></div>
+      <div class="seg" id="cap-range" role="group" aria-label="Capacity window"></div></div>
+    <div id="capacity"></div>
+  </section>
+</main>
+<aside id="detail" hidden></aside>
+<div id="tip" class="tip" hidden></div>
+<script>
+"use strict";
+// ---------- small helpers ----------
+const $ = (s) => document.querySelector(s);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("lockview." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("lockview." + k, JSON.stringify(v)); } catch { /* storage unavailable: keep defaults */ } },
+};
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v; else if (k === "style") e.style.cssText = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+const SVG = "http://www.w3.org/2000/svg";
+function s(tag, attrs) { const e = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs || {})) if (v != null) e.setAttribute(k, v); return e; }
+function dur(sec) {
+  if (sec == null || !isFinite(sec)) return "—";
+  sec = Math.max(0, sec);
+  if (sec < 90) return `${Math.round(sec)} s`;
+  if (sec < 5400) return `${Math.round(sec / 60)} min`;
+  if (sec < 86400 * 2) { const hh = Math.floor(sec / 3600), mm = Math.round((sec % 3600) / 60); return mm ? `${hh} h ${mm} min` : `${hh} h`; }
+  return `${(sec / 86400).toFixed(1)} d`;
+}
+function clock(t, now) {
+  if (t == null) return "—";
+  const d = new Date(t * 1000), n = new Date(now * 1000);
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const days = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date(n).setHours(0, 0, 0, 0)) / 864e5);
+  return days === 0 ? hm : days === 1 ? `${hm} tomorrow` : days === -1 ? `${hm} yesterday` : `${d.toLocaleDateString([], { day: "numeric", month: "short" })} ${hm}`;
+}
+const gb = (b) => b == null ? "—" : `${(b / 2 ** 30).toFixed(b < 10 * 2 ** 30 ? 1 : 0)} GB`;
+const home = (p) => (p || "").replace(/^\/home\/[^/]+/, "~");
+
+// ---------- colour by project, stable across runs (first seen gets the next slot) ----------
+function colorOf(project) {
+  if (!project) return "var(--s-none)";
+  const map = store.get("colors", {});
+  if (!(project in map)) {
+    const used = new Set(Object.values(map));
+    let i = 0; while (used.has(i) && i < 8) i++;
+    map[project] = i < 8 ? i : -1;
+    store.set("colors", map);
+  }
+  return map[project] < 0 ? "var(--s-none)" : `var(--s${map[project]})`;
+}
+// Ink for a label inside a bar, by the fill under it: faded bars and the light hues take dark ink.
+const DARK_INK = { light: new Set([2, 3, 4]), dark: new Set([3]) };
+function labelInk(project, faded) {
+  if (faded) return "var(--ink)";
+  const map = store.get("colors", {}), slot = project in map ? map[project] : -1;
+  const mode = getComputedStyle(document.documentElement).colorScheme.includes("dark") ? "dark" : "light";
+  if (slot < 0) return mode === "light" ? "#0b0b0b" : "#ffffff";  // the neutral grey
+  return DARK_INK[mode].has(slot) ? "#0b0b0b" : "#ffffff";
+}
+const ownerName = (o) => o ? (o.session || o.project || "unknown") : "unknown";
+function ownerCell(o) {
+  return h("span", { class: "owner" }, h("i", { class: "sw", style: `background:${colorOf(o && o.project)}` }),
+    h("span", {}, ownerName(o), o && o.worktree ? h("span", { class: "muted" }, " · " + o.worktree) : null));
+}
+
+// ---------- state ----------
+let S = null, lastOk = 0, detailKey = null;
+const RANGES = [3, 6, 12, 24];
+let pastHours = store.get("pastHours", 6);
+function renderRange() {
+  const g = $("#range"); g.replaceChildren();
+  for (const r of RANGES) g.append(h("button", { "aria-pressed": String(r === pastHours), onclick: () => { pastHours = r; store.set("pastHours", r); renderRange(); render(); } }, `${r} h`));
+}
+const THEMES = ["auto", "light", "dark"];
+let theme = store.get("theme", "auto");
+function applyTheme() {
+  if (theme === "auto") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = theme;
+  $("#theme").textContent = theme[0].toUpperCase() + theme.slice(1);
+}
+$("#theme").onclick = () => { theme = THEMES[(THEMES.indexOf(theme) + 1) % 3]; store.set("theme", theme); applyTheme(); render(); };
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    S = await r.json(); lastOk = Date.now();
+    document.body.classList.remove("stale");
+    render();
+  } catch (e) {
+    document.body.classList.add("stale");
+  }
+  updateStatus();
+}
+function updateStatus() {
+  if (!lastOk) { $("#status").textContent = "connecting…"; return; }
+  const ago = Math.round((Date.now() - lastOk) / 1000);
+  $("#status").textContent = ago > 15 ? `no answer from the app for ${ago} s: showing the last reading` : `updated ${ago} s ago${S && S.sample_ms ? ` · read in ${S.sample_ms} ms` : ""}`;
+}
+
+// ---------- items: one list of everything drawable, keyed for tooltips and the detail panel ----------
+function items() {
+  const out = [];
+  const now = S.now;
+  const gates = (S.gate && S.gate.gates) || [];
+  for (const g of gates) {
+    const base = { key: `gate:${g.pid}`, kind: "gate", g, owner: g.owner, label: g.label, command: g.command.join(" ") };
+    if (g.state === "running") {
+      for (const slot of g.slots) out.push({ ...base, lane: slot, start: g.started_at, end: now, est: g.predicted_end, phase: "running" });
+    } else if (g.predicted) {
+      for (const slot of g.predicted.slots) out.push({ ...base, lane: slot, start: g.predicted.start, end: g.predicted.end, phase: "predicted" });
+    }
+  }
+  for (const r of S.history || []) {
+    if (!r.lane || r.end == null) continue;
+    for (const lane of r.lanes || [r.lane]) out.push({ key: `hist:${r.unit}:${r.start}`, kind: "hist", r, owner: r.owner, label: r.label, command: r.command, lane, start: r.start, end: r.end, phase: "done" });
+  }
+  for (const lk of S.locks || []) {
+    const lane = "lock:" + lk.label;
+    for (const p of lk.holders) out.push({ key: `lock:${lk.path}:${p.pid}`, kind: "lock", lk, p, owner: p.owner, label: p.label, command: p.command, lane, start: p.since, end: now, est: p.predicted_end, phase: "running" });
+    for (const p of lk.waiters) if (p.predicted) out.push({ key: `lock:${lk.path}:${p.pid}`, kind: "lock", lk, p, owner: p.owner, label: p.label, command: p.command, lane, start: p.predicted.start, end: p.predicted.end, phase: "predicted" });
+  }
+  return out;
+}
+// A slot its lock's own kind can't take (gpu.3, cpu.4), only its short kind: as gate.short_only() has it.
+const isShortOnly = (sl) => !sl.kinds.includes(sl.lock);
+
+function lanes() {
+  const L = [];
+  for (const sl of (S.gate && S.gate.slots) || []) {
+    const short = isShortOnly(sl);
+    L.push({ id: sl.name, label: `${sl.lock.toUpperCase()} ${sl.name.split(".")[1]}${short ? " short" : ""}`,
+             title: short ? `${sl.name}: ${sl.lock}-short jobs only` : null, group: sl.lock });
+  }
+  for (const lk of S.locks || []) L.push({ id: "lock:" + lk.label, label: lk.label.split("/").pop(), title: lk.label, group: "lock" });
+  const seen = new Set(L.map((l) => l.id));
+  for (const r of S.history || []) if (r.lane && r.lane.startsWith("lock:") && !seen.has(r.lane)) { seen.add(r.lane); L.push({ id: r.lane, label: r.lane.split("/").pop(), title: r.lane.slice(5), group: "lock" }); }
+  return L;
+}
+
+// ---------- timeline ----------
+let measureCtx = null;
+function textWidth(t) { measureCtx = measureCtx || document.createElement("canvas").getContext("2d"); measureCtx.font = "11px system-ui, sans-serif"; return measureCtx.measureText(t).width; }
+function renderTimeline() {
+  const box = $("#timeline");
+  const now = S.now, all = items(), L = lanes();
+  const t0 = now - pastHours * 3600;
+  const ends = all.filter((i) => i.phase === "predicted" || i.est).map((i) => Math.max(i.end, i.est || 0));
+  const t1 = Math.min(now + 12 * 3600, Math.max(now + 3600, ...ends) + 600);
+  const W = Math.max(box.clientWidth, 640), left = 112, right = 14, top = 26, row = 28, barH = 16, gap = 10;
+  const x = (t) => left + ((Math.min(Math.max(t, t0), t1) - t0) / (t1 - t0)) * (W - left - right);
+  const y = {}; let yy = top, prev = null;
+  for (const l of L) { if (prev && prev !== l.group) yy += gap; y[l.id] = yy; yy += row; prev = l.group; }
+  const H = yy + 8;
+  const svg = s("svg", { width: W, height: H, role: "img", "aria-label": "Timeline of slots and locks" });
+  // hour ticks
+  const span = (t1 - t0) / 3600, step = span <= 5 ? 1800 : span <= 14 ? 3600 : span <= 30 ? 7200 : 14400;
+  for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) {
+    svg.append(s("line", { x1: x(t), x2: x(t), y1: top - 6, y2: H - 6, stroke: "var(--grid)", "stroke-width": 1 }));
+    if (Math.abs(x(t) - x(now)) < 34) continue;  // the "now" label sits there
+    const lab = s("text", { x: x(t), y: 14, "text-anchor": "middle" }); lab.textContent = clock(t, now).replace(" tomorrow", "+1").replace(" yesterday", "−1"); svg.append(lab);
+  }
+  for (const l of L) {
+    svg.append(s("line", { x1: left, x2: W - right, y1: y[l.id] + row / 2 + barH / 2 + 3, y2: y[l.id] + row / 2 + barH / 2 + 3, stroke: "var(--grid)", "stroke-width": 1, opacity: 0.6 }));
+    const t = s("text", { x: 0, y: y[l.id] + row / 2 + 4, class: "lane-label" }); t.textContent = l.label.length > 17 ? l.label.slice(0, 16) + "…" : l.label;
+    if (l.title) { const tt = s("title"); tt.textContent = l.title; t.append(tt); }
+    svg.append(t);
+  }
+  const marks = s("g");
+  for (const it of all) {
+    if (!(it.lane in y) || it.end < t0 || it.start > t1) continue;
+    const c = colorOf(it.owner && it.owner.project), by = y[it.lane] + (row - barH) / 2;
+    const g = s("g", { class: "hit", tabindex: 0, "data-key": it.key });
+    const xs = x(it.start), xe = x(it.end), w = Math.max(2, xe - xs - 2);
+    if (it.phase === "predicted") {
+      g.append(s("rect", { class: "mark", x: xs + 1, y: by + 0.75, width: Math.max(2, w - 0.5), height: barH - 1.5, rx: 4, fill: c, "fill-opacity": 0.16, stroke: c, "stroke-width": 1.5 }));
+    } else {
+      g.append(s("rect", { class: "mark", x: xs + 1, y: by, width: w, height: barH, rx: 4, fill: c, "fill-opacity": it.phase === "done" ? 0.55 : 1 }));
+      if (it.est && it.est > it.end) {
+        const ee = x(it.est);
+        g.append(s("rect", { class: "mark", x: xe, y: by + 0.75, width: Math.max(2, ee - xe - 1), height: barH - 1.5, rx: 4, fill: c, "fill-opacity": 0.16, stroke: c, "stroke-width": 1.5 }));
+      }
+      if (it.r && it.r.cut_short) g.append(s("rect", { x: Math.max(xs + 1, xe - 4), y: by, width: 3, height: barH, fill: "var(--critical)" }));
+    }
+    const label = it.phase === "predicted" && it.g && it.g.position ? `#${it.g.position} ${it.label}` : it.label;
+    const tw = textWidth(label);
+    if (tw + 10 < w) {
+      const t = s("text", { x: xs + 6, y: by + barH / 2 + 4, class: "bar-label", style: `fill:${labelInk(it.owner && it.owner.project, it.phase !== "running")}` });
+      t.textContent = label; g.append(t);
+    }
+    // a hit area taller than the bar
+    g.append(s("rect", { x: xs, y: y[it.lane] + 2, width: Math.max(8, (it.est ? x(it.est) : xe) - xs), height: row - 4, fill: "transparent" }));
+    g.addEventListener("pointermove", (e) => showTip(e, it));
+    g.addEventListener("pointerleave", hideTip);
+    g.addEventListener("focus", (e) => { const r = e.target.getBoundingClientRect(); showTip({ clientX: r.left + 10, clientY: r.bottom }, it); });
+    g.addEventListener("blur", hideTip);
+    g.addEventListener("click", () => openDetail(it.key));
+    marks.append(g);
+  }
+  svg.append(marks);
+  svg.append(s("line", { x1: x(now), x2: x(now), y1: top - 8, y2: H - 6, stroke: "var(--ink)", "stroke-width": 1 }));
+  const nl = s("text", { x: x(now), y: 14, "text-anchor": "middle", style: "fill:var(--ink);font-weight:600" }); nl.textContent = "now"; svg.append(nl);
+  box.replaceChildren(svg);
+  // legend: every project on screen
+  const projects = [...new Set(all.filter((i) => i.end >= t0 && i.start <= t1).map((i) => (i.owner && i.owner.project) || ""))].sort();
+  $("#legend").replaceChildren(
+    ...projects.map((p) => h("span", {}, h("i", { class: "sw", style: `background:${colorOf(p)}` }), p || "unknown")),
+    h("span", {}, h("i", { class: "key-run", style: "background:var(--ink-2)" }), "ran"),
+    h("span", {}, h("i", { class: "key-est" }), "estimated"));
+}
+
+// ---------- tooltip ----------
+function tipRows(it) {
+  const now = S.now, rows = [];
+  rows.push(h("div", { class: "v mono" }, it.label || "job"));
+  rows.push(h("div", {}, ownerName(it.owner), it.owner && it.owner.worktree ? h("span", { class: "k" }, " · " + it.owner.worktree) : null));
+  if (it.phase === "done") {
+    rows.push(h("div", {}, h("span", { class: "v" }, dur(it.end - it.start)), h("span", { class: "k" }, ` ran ${clock(it.start, now)}–${clock(it.end, now)}`)));
+    const end = it.r && endOf(it.r);
+    if (end) rows.push(h("div", { class: `status ${end[0]}` }, end[1]));
+    if (it.r && !it.r.placed) rows.push(h("div", { class: "k" }, "not in the gate's log: drawn in the first free slot of its kind"));
+  } else if (it.phase === "running") {
+    rows.push(h("div", {}, h("span", { class: "v" }, `running ${dur(now - it.start)}`), it.est ? h("span", { class: "k" }, ` · ends ≈ ${clock(it.est, now)}`) : null));
+  } else {
+    rows.push(h("div", {}, h("span", { class: "v" }, `starts ≈ ${clock(it.start, now)}`), h("span", { class: "k" }, ` · runs ≈ ${dur(it.end - it.start)}`)));
+  }
+  const e = (it.g && it.g.estimate) || (it.p && it.p.estimate);
+  if (e) rows.push(h("div", { class: "k" }, estimateText(e)));
+  return rows;
+}
+function showTip(ev, it) {
+  const t = $("#tip"); t.replaceChildren(...tipRows(it)); t.hidden = false;
+  const r = t.getBoundingClientRect();
+  t.style.left = Math.min(ev.clientX + 14, innerWidth - r.width - 8) + "px";
+  t.style.top = Math.min(ev.clientY + 14, innerHeight - r.height - 8) + "px";
+}
+function hideTip() { $("#tip").hidden = true; }
+
+// ---------- tiles ----------
+function meter(frac, cls, marks) {
+  const m = h("div", { class: "meter " + (cls || "") }, h("i", { style: `width:${Math.max(0, Math.min(1, frac)) * 100}%` }));
+  for (const mk of marks || []) m.append(h("b", { style: `left:calc(${mk * 100}% - 1px)` }));
+  return m;
+}
+function renderTiles() {
+  const m = S.machine, gs = S.gate, now = S.now, out = [];
+  const cfg = gs.config || { kinds: {} };
+  const need = (k) => (cfg.kinds[k] || {}).need_ram;
+  const byLock = (lock) => (gs.gates || []).filter((g) => (cfg.kinds[g.kind] || {}).lock === lock);
+  for (const lock of ["gpu", "cpu"]) {
+    const gg = byLock(lock), wait = gg.filter((g) => g.state === "waiting"), run = gg.filter((g) => g.state === "running");
+    const slots = (gs.slots || []).filter((x) => x.lock === lock), main = slots.filter((x) => !isShortOnly(x));
+    if (!slots.length) continue;  // no such lock: a machine without a GPU, or no readable config
+    const busy = (xs) => xs.filter((x) => x.holder != null).length;
+    const drain = Math.max(0, ...wait.map((g) => (g.predicted ? g.predicted.end : 0)), ...run.map((g) => g.predicted_end || 0));
+    const oldest = wait.length ? Math.max(...wait.map((g) => now - g.queued_at)) : 0;
+    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, `${lock.toUpperCase()} gate`),
+      h("div", { class: "value" }, wait.length ? `${wait.length} waiting` : "no queue"),
+      h("div", { class: "sub" }, `${busy(main)} of ${main.length} slots busy` +
+        slots.filter(isShortOnly).map((x) => ` · ${x.name} for short jobs ${x.holder != null ? "busy" : "free"}`).join("")),
+      h("div", { class: "sub" }, wait.length ? `oldest waited ${dur(oldest)} · clears ≈ ${clock(drain, now)}` : run.length ? `last ends ≈ ${clock(drain, now)}` : "idle")));
+  }
+  const ram = m.ram_available_gb, total = m.ram_total_gb, needs = ["cpu", "gpu"].filter((k) => need(k) != null);
+  const ramCls = needs.includes("cpu") && ram < need("cpu") ? "critical" : needs.includes("gpu") && ram < need("gpu") ? "warning" : "";
+  out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "RAM available"), h("div", { class: "value" }, `${ram} GB`),
+    meter(ram / total, ramCls, needs.map((k) => need(k) / total)),
+    h("div", { class: "sub" }, `of ${total} GB` + needs.map((k, i) => (i ? `, ${k} ${need(k)}` : ` · ${k} jobs need ${need(k)}`)).join(""))));
+  const g = m.gpu;
+  if (g.ok) {
+    const vneed = (cfg.vram_mb || 0) / 1024, free = g.free_mb / 1024;
+    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "VRAM free"), h("div", { class: "value" }, `${free.toFixed(1)} GB`),
+      meter(free / (g.total_mb / 1024), free < vneed ? "warning" : "", vneed ? [vneed / (g.total_mb / 1024)] : []),
+      h("div", { class: "sub" }, `of ${(g.total_mb / 1024).toFixed(0)} GB${vneed ? ` · gpu jobs need ${vneed.toFixed(1)}` : ""} · busy ${g.util_pct}%`)));
+  } else {
+    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "GPU"), h("div", { class: "value" }, h("span", { class: "status critical" }, "unreadable")), h("div", { class: "sub" }, g.error)));
+  }
+  const p = m.pressure || {}, oomd = m.oomd, lim = oomd.limit_pct;
+  const pv = p.full_avg10 || 0;
+  out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "Session memory pressure"), h("div", { class: "value" }, `${pv.toFixed(1)}%`),
+    meter(pv / 100, pv >= lim ? "critical" : pv >= lim / 2 ? "warning" : "", [lim / 100]),
+    h("div", { class: "sub" }, oomd.kills ? `systemd-oomd kills the whole session after ${oomd.duration_s} s above ${lim}%` : "systemd-oomd does not watch this session")));
+  const load = h("div", { class: "sub" }, `load ${m.load[0].toFixed(1)} on ${m.cpus} cores`);
+  if ((cfg.programs || []).length) {  // config.toml's [gpu] programs: those that must run through the gate
+    const progs = gs.programs || [], ungated = progs.filter((p) => !p.gated);
+    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "Gated programs"), h("div", { class: "value" }, `${progs.length} running`),
+      ungated.length ? h("div", { class: "status critical" }, `${ungated.length} outside the gate: no gpu job can start`) : h("div", { class: "status good" }, "all inside the gate"),
+      load));
+  } else {
+    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "CPU load"), h("div", { class: "value" }, m.load[0].toFixed(1)),
+      meter(Math.min(1, m.load[0] / m.cpus), m.load[0] > m.cpus ? "warning" : "", []), h("div", { class: "sub" }, `on ${m.cpus} cores`)));
+  }
+  $("#tiles").replaceChildren(...out);
+}
+
+// ---------- tables ----------
+// How a finished run ended, as a status class and text; null for a plain end.
+function endOf(r) {
+  if (r.outcome === "oom-kill") return ["critical", "killed by the OOM killer"];
+  if (r.outcome === "killed") return ["critical", "killed (SIGKILL on request)"];
+  if (r.outcome === "lost") return ["warning", "lost when its session died"];
+  if (r.limit_stop) return ["warning", `stopped at the ${r.kind} limit`];
+  if (r.code > 128) return ["critical", `ended by signal ${r.code - 128}`];
+  if (r.code) return ["warning", `exit ${r.code}`];
+  return null;
+}
+const waitedText = (w) => Object.entries(w || {}).filter(([, t]) => t >= 1).sort((a, b) => b[1] - a[1]).map(([why, t]) => `${why} ${dur(t)}`).join(" · ");
+function estimateText(e) {
+  if (!e) return "no estimate";
+  if (e.basis === "default") return `no history; ${e.key}: ${dur(e.median)} typical`;
+  const range = e.p90 > e.median * 1.05 ? `, p90 ${dur(e.p90)}` : "";
+  return `${dur(e.median)}${range} · median of ${e.n} run${e.n === 1 ? "" : "s"} of ${e.basis === "exact" ? "this command" : e.key}`;
+}
+function estimateCell(e) {
+  if (!e) return h("span", { class: "muted" }, "—");
+  if (e.basis === "default") return h("span", { title: estimateText(e) }, h("span", { class: "muted" }, `~${dur(e.median)} `), h("span", { class: "tag" }, "guess"));
+  return h("span", { title: estimateText(e) }, dur(e.median), e.p90 > e.median * 1.05 ? h("span", { class: "muted" }, ` – ${dur(e.p90)}`) : null, h("span", { class: "muted" }, ` · ${e.n}×`));
+}
+function memCell(st, cap) {
+  if (!st || st.memory_current == null) return h("span", { class: "muted" }, "—");
+  const max = st.memory_max || cap, frac = max ? st.memory_current / max : 0;
+  return h("span", { title: `peak ${gb(st.memory_peak)}${max ? ` of ${gb(max)} cap` : ""}` }, `${gb(st.memory_current)}`, max ? h("span", { class: "muted" }, ` / ${gb(max)}`) : null,
+    max ? h("span", { class: "minim " + (frac > 0.9 ? "critical" : frac > 0.75 ? "warning" : "") }, h("i", { style: `width:${Math.min(1, frac) * 100}%` })) : null);
+}
+function etaCell(it, now) {
+  if (it.state === "running") {
+    if (it.predicted_end == null) return h("span", { class: "muted" }, "—");
+    const guess = it.estimate && it.estimate.basis === "default";
+    return h("span", {}, `ends ≈ ${clock(it.predicted_end, now)}`, h("div", { class: "muted" }, it.overrun ? h("span", { class: "tag warn" }, guess ? "past the guess: unknown" : "past its usual range") : `in ${dur(it.predicted_end - now)}${guess ? " (guess)" : ""}`));
+  }
+  if (!it.predicted) return h("span", { class: "muted" }, "—");
+  return h("span", {}, `starts ≈ ${clock(it.predicted.start, now)}`, h("div", { class: "muted" }, `ends ≈ ${clock(it.predicted.end, now)}`));
+}
+// A waiter's failing ready() conditions, or a running job's ways of holding a slot without using it.
+function notesCell(g) {
+  if (g.flags && g.flags.length) return h("ul", { class: "reasons flags" }, g.flags.map((f) => h("li", {}, f)));
+  if (g.reasons && g.reasons.length) return h("ul", { class: "reasons" }, g.reasons.map((r) => h("li", {}, r)));
+  return g.state === "waiting" ? h("span", { class: "muted" }, "ready: starts at the gate's next 15 s check") : "";
+}
+function renderQueue() {
+  const gs = S.gate, now = S.now, t = $("#queue");
+  if (!gs.installed) { t.replaceChildren(h("tr", {}, h("td", {}, `The gate can't be shown: ${gs.error}`))); return; }
+  const cfg = gs.config;
+  const third = (gs.slots || []).find((x) => x.lock === "gpu" && isShortOnly(x));
+  $("#gate-note").textContent = [
+    ...Object.entries(cfg.kinds).map(([k, v]) => `${k}: ${v.slots} slot${v.slots > 1 ? "s" : ""}, ${v.mem} cap` +
+      (v.limit ? `, stopped at ${dur(v.limit)}` : "")),
+    `solo patience ${dur(cfg.solo_patience)}`,
+    ...(third && cfg.third_ram ? [`${third.name} needs ${cfg.third_ram} GB RAM`] : []),
+  ].join(" · ");
+  // per-owner chips: how much each agent has queued
+  const by = {};
+  for (const g of gs.gates) {
+    const k = ownerName(g.owner), o = (by[k] = by[k] || { owner: g.owner, run: 0, wait: 0, left: 0 });
+    if (g.state === "running") { o.run++; o.left += g.remaining || 0; } else { o.wait++; o.left += g.estimate ? g.estimate.median : 0; }
+  }
+  $("#owners").replaceChildren(...Object.entries(by).sort((a, b) => b[1].left - a[1].left).map(([k, o]) =>
+    h("span", { class: "chip" }, h("i", { class: "sw", style: `background:${colorOf(o.owner.project)}` }), k,
+      h("span", { class: "muted" }, ` ${o.run} running · ${o.wait} waiting · ≈ ${dur(o.left)} of work left`))));
+  const head = h("tr", {}, ["", "Owner", "Job", "Queued", "Waited / ran", "Estimate", "When", "Memory", "Notes"].map((c, i) => h("th", { class: i === 3 || i === 4 ? "num" : "" }, c)));
+  const rows = [head];
+  const groups = [["Running", gs.gates.filter((g) => g.state === "running")]];
+  for (const lock of [...new Set(Object.values(cfg.kinds).map((k) => k.lock))]) {
+    const w = gs.gates.filter((g) => g.state === "waiting" && cfg.kinds[g.kind].lock === lock).sort((a, b) => a.position - b.position);
+    if (w.length) groups.push([`Waiting for ${lock}`, w]);
+  }
+  for (const [title, list] of groups) {
+    if (!list.length) continue;
+    rows.push(h("tr", { class: "group" }, h("td", { colspan: 9 }, `${title} (${list.length})`)));
+    for (const g of list) {
+      const tags = [];
+      if (g.kind !== "cpu") tags.push(h("span", { class: "tag" }, g.kind));
+      if (g.old_copy) tags.push(h("span", { class: "tag warn", title: "This gate runs an older copy of the gate than the installed one" }, "old gate copy"));
+      const first = g.state === "running" ? h("span", {}, h("span", { class: "status good" }, g.slots.join("+"))) : h("span", { class: "ink2" }, `#${g.position}`);
+      rows.push(h("tr", { class: "row", onclick: () => openDetail(`gate:${g.pid}`) },
+        h("td", {}, first),
+        h("td", {}, ownerCell(g.owner)),
+        h("td", {}, h("div", { class: "job mono", title: g.command.join(" ") }, g.label || g.command.join(" ")), h("div", {}, ...tags)),
+        h("td", { class: "num" }, clock(g.queued_at, now)),
+        h("td", { class: "num" }, g.state === "running" ? h("span", {}, dur(now - g.started_at), h("div", { class: "muted" }, `waited ${dur(g.started_at - g.queued_at)}`)) : dur(now - g.queued_at)),
+        h("td", {}, estimateCell(g.estimate)),
+        h("td", {}, etaCell(g, now)),
+        h("td", { class: "num" }, g.state === "running" ? memCell(g.stats) : "", g.vram_mb ? h("div", { class: "muted" }, `VRAM ${(g.vram_mb / 1024).toFixed(1)} GB`) : null),
+        h("td", {}, notesCell(g))));
+    }
+  }
+  if (!gs.gates.length) rows.push(h("tr", {}, h("td", { colspan: 9, class: "muted" }, "No gate jobs running or waiting.")));
+  t.replaceChildren(...rows);
+}
+// ---------- other machines ----------
+const gib = (b) => `${(b / 2 ** 30).toFixed(b < 10 * 2 ** 30 ? 1 : 0)}`;
+function remoteState(hs) {
+  if (hs.connected && hs.age != null && hs.age < 15) return ["good", "live"];
+  if (hs.reading) return ["warning", `no reading for ${dur(hs.age)}`];
+  if (hs.error) return ["critical", "unreachable"];
+  return [null, "connecting…"];
+}
+function remoteTiles(r) {
+  const tile = (label, value, m, sub) => h("div", { class: "tile" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value), m, h("div", { class: "sub" }, sub));
+  const out = [tile("RAM available", `${gib(r.ram_available)} GB`, meter(r.ram_available / r.ram_total), `of ${gib(r.ram_total)} GB`)];
+  for (const g of r.gpus) {
+    const free = g.total_mb - g.used_mb;
+    out.push(tile(r.gpus.length > 1 ? `GPU ${g.index}: VRAM free` : "VRAM free", `${(free / 1024).toFixed(1)} GB`, meter(free / g.total_mb),
+      `of ${(g.total_mb / 1024).toFixed(0)} GB · busy ${g.util_pct}% · ${g.name.replace(/^NVIDIA (GeForce )?/, "")}`));
+  }
+  if (r.gpu_error) out.push(tile("GPU", h("span", { class: "status critical" }, "unreadable"), null, r.gpu_error));
+  out.push(tile("CPU busy", r.cpu_pct == null ? "—" : `${Math.round(r.cpu_pct)}%`, meter((r.cpu_pct || 0) / 100), `load ${r.load[0].toFixed(1)} on ${r.cpus} cores`));
+  if (r.pressure) out.push(tile("Memory pressure", `${r.pressure.full.toFixed(1)}%`, meter(r.pressure.full / 100), `full, system-wide · some ${r.pressure.some.toFixed(1)}%`));
+  return h("div", { class: "tiles" }, out);
+}
+function remoteJobs(hs) {
+  const r = hs.reading, me = r.home.split("/").pop(), now = S.now;
+  if (!r.jobs.length) return h("div", { class: "muted" }, "Nothing heavy running.");
+  const head = h("tr", {}, ["Owner", "Job", "Started", "Running", "CPU", "Memory", "VRAM"].map((c, i) => h("th", { class: i >= 2 ? "num" : "" }, c)));
+  return h("div", { style: "overflow-x:auto" }, h("table", {}, head, r.jobs.map((j) =>
+    h("tr", { class: "row", onclick: () => openDetail(`remote:${hs.alias}:${j.pid}`) },
+      h("td", {}, ownerCell(j.owner), j.user !== me ? h("div", { class: "muted" }, j.user) : null),
+      h("td", {}, h("div", { class: "job mono", title: j.command }, j.command), j.procs > 1 ? h("div", { class: "muted" }, `${j.procs} processes`) : null),
+      h("td", { class: "num" }, clock(j.start, now)),
+      h("td", { class: "num" }, dur(r.t - j.start)),
+      h("td", { class: "num" }, `${j.cpu.toFixed(1)} cores`),
+      h("td", { class: "num" }, gb(j.rss)),
+      h("td", { class: "num" }, j.vram_mb ? `${(j.vram_mb / 1024).toFixed(1)} GB` : h("span", { class: "muted" }, "—"))))));
+}
+function renderRemotes() {
+  const R = S.remotes, box = $("#remotes");
+  if (!R.hosts.length) { box.replaceChildren(h("div", { class: "muted" }, "None. List their ssh aliases as ", h("span", { class: "mono" }, "hosts"), " under ", h("span", { class: "mono" }, "[remote]"), " in ", h("span", { class: "mono" }, R.config), ", and reopen the app.")); return; }
+  box.replaceChildren(...R.hosts.map((hs) => {
+    const [cls, text] = remoteState(hs), r = hs.reading;
+    const head = h("div", { class: "remote-head" }, h("h3", { class: "mono" }, hs.alias), r && r.host !== hs.alias ? h("span", { class: "muted mono" }, r.host) : null,
+      h("span", { class: cls ? `status ${cls}` : "muted" }, text), hs.error && cls !== "good" ? h("span", { class: "muted mono" }, hs.error) : null,
+      r && r.sessions.length ? h("span", { class: "muted", title: r.sessions.join(", ") }, `${r.sessions.length} Claude session${r.sessions.length > 1 ? "s" : ""} there`) : null);
+    return h("div", { class: "remote" + (r && cls !== "good" ? " stale-host" : "") }, head, r ? remoteTiles(r) : null, r ? remoteJobs(hs) : null);
+  }));
+}
+function renderLocks() {
+  const now = S.now, box = $("#locks");
+  if (!(S.locks || []).length) { box.replaceChildren(h("div", { class: "muted" }, "No other exclusive locks held.")); return; }
+  box.replaceChildren(...S.locks.map((lk) => {
+    const head = h("tr", {}, ["", "Owner", "Job", "Since", "Estimate", "When", "Memory"].map((c, i) => h("th", { class: i === 3 ? "num" : "" }, c)));
+    const rows = [head];
+    lk.holders.forEach((p) => rows.push(partyRow(lk, p, "holds", now)));
+    lk.waiters.forEach((p, i) => rows.push(partyRow(lk, p, `#${i + 1}`, now)));
+    return h("div", { style: "margin-bottom:12px" }, h("div", { class: "mono ink2", style: "margin-bottom:4px" }, lk.label,
+      h("span", { class: "muted" }, ` · ${lk.holders.length} holding · ${lk.waiters.length} waiting`)), h("div", { style: "overflow-x:auto" }, h("table", {}, rows)));
+  }));
+}
+function partyRow(lk, p, first, now) {
+  const held = first === "holds";
+  return h("tr", { class: "row", onclick: () => openDetail(`lock:${lk.path}:${p.pid}`) },
+    h("td", {}, held ? h("span", { class: "status good" }, "holds") : h("span", { class: "ink2" }, first)),
+    h("td", {}, ownerCell(p.owner)),
+    h("td", {}, h("div", { class: "job mono", title: p.command }, p.label || p.command)),
+    h("td", { class: "num" }, clock(p.since, now), h("div", { class: "muted" }, `${held ? "held" : "waiting"} ${dur(now - p.since)}`)),
+    h("td", {}, estimateCell(p.estimate)),
+    h("td", {}, held ? etaCell({ state: "running", predicted_end: p.predicted_end, overrun: p.overrun, estimate: p.estimate }, now) : etaCell({ state: "waiting", predicted: p.predicted }, now)),
+    h("td", { class: "num" }, held ? memCell(p.stats) : ""));
+}
+function outcomeCell(r) {
+  const end = endOf(r);
+  if (!end) return h("span", { class: "muted" }, r.code === 0 ? "exit 0" : "ended");
+  if (r.code && r.code <= 128 && !r.outcome) return h("span", { class: "tag warn" }, end[1]);
+  return h("span", { class: `status ${end[0]}` }, end[1]);
+}
+function renderHistory() {
+  const now = S.now, t0 = now - pastHours * 3600;
+  const rows = (S.history || []).filter((r) => (r.end || r.start) >= t0).sort((a, b) => (b.end || b.start) - (a.end || a.start));
+  const lost = rows.filter((r) => r.outcome === "lost").length;
+  $("#hist-note").textContent = `${rows.length - lost} in the past ${pastHours} h${lost ? ` · ${lost} lost when their session died` : ""} · from the gate's event log, and the user journal for lock runs and runs the log lacks`;
+  const head = h("tr", {}, ["Ended", "Ran", "Waited", "Lane", "Owner", "Job", "Peak", "Outcome"].map((c, i) => h("th", { class: i < 3 || i === 6 ? "num" : "" }, c)));
+  const out = [head];
+  for (const r of rows.slice(0, 150)) {
+    out.push(h("tr", { class: "row", onclick: () => openDetail(`hist:${r.unit}:${r.start}`) },
+      h("td", { class: "num" }, r.end ? clock(r.end, now) : "—"),
+      h("td", { class: "num" }, r.end ? dur(r.end - r.start) : "—"),
+      h("td", { class: "num", title: waitedText(r.waited) || null }, r.queued_at ? dur(r.start - r.queued_at) : h("span", { class: "muted" }, "—")),
+      h("td", { class: "ink2", title: r.lane && !r.placed ? "not in the gate's log: its slot is the app's placement" : null }, r.lane ? (r.lane.startsWith("lock:") ? r.lane.split("/").pop() : r.lanes.join("+") + (r.placed ? "" : "?")) : "—"),
+      h("td", {}, ownerCell(r.owner)),
+      h("td", {}, h("div", { class: "job mono", title: r.command }, r.label || r.command), r.kind && r.kind.startsWith("gpu-") ? h("span", { class: "tag" }, r.kind) : null),
+      h("td", { class: "num" }, r.peak != null ? h("span", {}, gb(r.peak), r.mem ? h("span", { class: "muted" }, ` / ${r.mem}`) : null) : h("span", { class: "muted" }, "—")),
+      h("td", {}, outcomeCell(r))));
+  }
+  if (rows.length === 0) out.push(h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No finished gate jobs in this window.")));
+  $("#history").replaceChildren(...out);
+}
+
+// ---------- capacity ----------
+const CAP_RANGES = [[24, "24 h"], [72, "3 d"], [168, "7 d"]];
+let capHours = store.get("capHours", 24);
+function renderCapRange() {
+  $("#cap-range").replaceChildren(...CAP_RANGES.map(([hrs, label]) => h("button", { "aria-pressed": String(hrs === capHours),
+    onclick: () => { capHours = hrs; store.set("capHours", hrs); renderCapRange(); renderCapacity(); } }, label)));
+}
+// The gate's reasons for waiting, as its log names them.
+const WHY = { slots: "no free slot", ram: "too little RAM available", fifo: "an older gpu job waits", program: "a gated program runs outside the gate",
+  solo: "a gpu-solo job needs no gated program running", drain: "the GPU drains for a solo job past its patience", vram: "too little VRAM free" };
+const hours = (sec) => sec >= 36000 ? `${Math.round(sec / 3600)} h` : `${(sec / 3600).toFixed(1)} h`;
+const pct = (a, b) => b ? `${Math.round((100 * a) / b)}%` : "—";
+function spreadText(x, fmt) { return x && x.n ? `${fmt(x.p50)} · ${fmt(x.p90)} · ${fmt(x.max)}` : "—"; }
+function renderCapacity() {
+  const box = $("#capacity"), c = S.capacity && S.capacity[capHours], cfg = S.gate.config;
+  if (!c || !cfg) { box.replaceChildren(h("div", { class: "muted" }, "Not read yet: the first reading comes with the journal's.")); $("#cap-note").textContent = ""; return; }
+  if (c.to - c.from < 60) { box.replaceChildren(h("div", { class: "muted" }, "The gate's event log has no jobs yet.")); $("#cap-note").textContent = ""; return; }
+  const since = { log: `, since the log began ${clock(c.from, S.now)}`, "unlogged run": `, since ${clock(c.from, S.now)}, when the last gate run the log lacks ended` };
+  $("#cap-note").textContent = `from the gate's event log and the live gates${since[c.limited_by] || ""}`;
+  const gpu = c.locks.gpu, cpu = c.locks.cpu, tiles = [];
+  if (gpu) {
+    tiles.push(h("div", { class: "tile" }, h("div", { class: "label" }, "GPU slots busy"), h("div", { class: "value" }, pct(gpu.busy_s, gpu.slot_s)),
+      meter(gpu.busy_s / gpu.slot_s), h("div", { class: "sub" }, `${hours(gpu.busy_s)} of ${hours(gpu.slot_s)} on ${gpu.slots} slots` +
+        gpu.extra.map((x) => ` · ${x.slot} ${hours(x.busy_s)}`).join(""))));
+    tiles.push(h("div", { class: "tile" }, h("div", { class: "label" }, "GPU jobs waiting"), h("div", { class: "value" }, hours(gpu.waiting_s)),
+      h("div", { class: "sub" }, `of ${hours(c.to - c.from)}, with every slot busy ${pct(gpu.full_while_waiting_s, gpu.waiting_s)} of that time`),
+      h("div", { class: "sub" }, `${hours(gpu.idle_while_waiting_s)} of slot time free while a job waited: drains, or RAM, VRAM or program checks`)));
+  }
+  const top = c.gpu_together;
+  tiles.push(h("div", { class: "tile" }, h("div", { class: "label" }, "GPU jobs' memory together"), h("div", { class: "value" }, top.at ? gb(top.bytes) : "—"),
+    h("div", { class: "sub" }, top.at ? `${top.jobs} jobs at ${clock(top.at, S.now)}, by each one's own peak` : "no GPU job with a logged peak"),
+    cfg.third_ram ? h("div", { class: "sub" }, `of ${S.machine.ram_total_gb} GB · a third job starts with ${cfg.third_ram} GB available`) : null));
+  if (cpu) tiles.push(h("div", { class: "tile" }, h("div", { class: "label" }, "CPU slots busy"), h("div", { class: "value" }, pct(cpu.busy_s, cpu.slot_s)),
+    meter(cpu.busy_s / cpu.slot_s), h("div", { class: "sub" }, `${hours(cpu.busy_s)} of ${hours(cpu.slot_s)} on ${cpu.slots} slots` +
+      cpu.extra.map((x) => ` · ${x.slot} ${hours(x.busy_s)}`).join("") + ` · jobs waiting ${hours(cpu.waiting_s)}`)));
+  const head = h("tr", {}, ["Kind", "Jobs", "Waited p50 · p90 · max", "Waiting by reason", "Ran p50 · p90", "Peak p50 · p90 · max", "Exit ≠ 0", "Cut short"]
+    .map((t, i) => h("th", { class: i === 1 || i >= 6 ? "num" : "" }, t)));
+  const rows = [head];
+  for (const kind of Object.keys(cfg.kinds)) {
+    const k = c.kinds[kind];
+    if (!k) { rows.push(h("tr", {}, h("td", {}, kind), h("td", { class: "num muted" }, "0"), h("td", { colspan: 6, class: "muted" }, `no ${kind} jobs queued since ${clock(c.from, S.now)}`))); continue; }
+    rows.push(h("tr", {},
+      h("td", {}, kind),
+      h("td", { class: "num" }, String(k.jobs), k.waiting ? h("div", { class: "muted" }, `${k.waiting} waiting`) : null),
+      h("td", {}, spreadText(k.wait, dur), h("div", { class: "muted" }, `${hours(k.wait.total)} in all`)),
+      h("td", { class: "ink2", title: Object.keys(k.by_reason).map((w) => `${w}: ${WHY[w] || "?"}`).join("\n") || null }, waitedText(k.by_reason) || h("span", { class: "muted" }, "—")),
+      h("td", {}, k.run.n ? `${dur(k.run.p50)} · ${dur(k.run.p90)}` : "—"),
+      h("td", {}, spreadText(k.peak, gb), cfg.kinds[kind] ? h("div", { class: "muted" }, `cap ${cfg.kinds[kind].mem}`) : null),
+      h("td", { class: "num" }, String(k.failed)),
+      h("td", { class: "num" }, String(k.cut_short), k.limit_stops ? h("div", { class: "muted" }, `${k.limit_stops} at the limit`) : null)));
+  }
+  box.replaceChildren(h("section", { class: "tiles", style: "margin-bottom:12px" }, tiles), h("div", { style: "overflow-x:auto" }, h("table", {}, rows)));
+}
+
+// ---------- detail panel ----------
+function findItem(key) {
+  const [kind] = key.split(":");
+  if (kind === "gate") { const g = S.gate.gates.find((g) => `gate:${g.pid}` === key); return g && { kind, g }; }
+  if (kind === "hist") { const r = S.history.find((r) => `hist:${r.unit}:${r.start}` === key); return r && { kind, r }; }
+  if (kind === "lock") { for (const lk of S.locks) for (const p of [...lk.holders, ...lk.waiters]) if (`lock:${lk.path}:${p.pid}` === key) return { kind, lk, p }; }
+  if (kind === "remote") { for (const hs of S.remotes.hosts) for (const j of (hs.reading && hs.reading.jobs) || []) if (`remote:${hs.alias}:${j.pid}` === key) return { kind, hs, j }; }
+  return null;
+}
+function openDetail(key) { detailKey = key; renderDetail(); }
+function renderDetail() {
+  const a = $("#detail");
+  const it = detailKey && S && findItem(detailKey);
+  if (!it) { a.hidden = true; return; }
+  const now = S.now, dl = [];
+  const row = (k, v) => { if (v != null && v !== "") dl.push(h("dt", {}, k), h("dd", {}, v)); };
+  let title = "", command = "";
+  if (it.kind === "gate") {
+    const g = it.g; title = g.label; command = g.command.join(" ");
+    row("State", g.state === "running" ? `running in ${g.slots.join(" + ")}` : `waiting, #${g.position} for ${g.kind}`);
+    row("Owner", ownerCell(g.owner));
+    row("Gate pid", String(g.pid)); row("Kind", g.kind + (g.needs_idle ? " (needs an idle GPU)" : ""));
+    row("Queued", `${clock(g.queued_at, now)} (${dur(now - g.queued_at)} ago)`);
+    if (g.started_at) row("Started", `${clock(g.started_at, now)}, after waiting ${dur(g.started_at - g.queued_at)}`);
+    row("Estimate", estimateText(g.estimate));
+    if (g.predicted_end) row("Ends", `≈ ${clock(g.predicted_end, now)}${g.overrun ? " (past its usual range: a rough guess)" : ""}`);
+    if (g.predicted) row("Predicted", `${clock(g.predicted.start, now)} → ${clock(g.predicted.end, now)} in ${g.predicted.slots.join(" + ")}, if RAM, VRAM and program checks pass then`);
+    if (g.reasons && g.reasons.length) row("Why it waits", h("ul", { class: "reasons" }, g.reasons.map((r) => h("li", {}, r))));
+    if (g.flags && g.flags.length) row("Flags", h("ul", { class: "reasons flags" }, g.flags.map((f) => h("li", {}, f))));
+    if (g.stats) row("Memory", `${gb(g.stats.memory_current)} now, peak ${gb(g.stats.memory_peak)}, cap ${gb(g.stats.memory_max)}`);
+    if (g.vram_mb) row("VRAM", `${(g.vram_mb / 1024).toFixed(1)} GB`);
+    row("VRAM needed", `${(g.vram_need_mb / 1024).toFixed(1)} GB free to start`);
+    row("Scope", g.scope ? h("span", { class: "mono" }, g.scope.split("/").pop()) : null);
+    row("Directory", h("span", { class: "mono" }, home(g.cwd)));
+    if (g.old_copy) row("Gate copy", "older than the installed gate (it was replaced while this job waited)");
+  } else if (it.kind === "hist") {
+    const r = it.r, end = endOf(r); title = r.label; command = r.command;
+    row("Ran", r.end ? `${clock(r.start, now)} → ${clock(r.end, now)} (${dur(r.end - r.start)})` : `started ${clock(r.start, now)}, no end logged`);
+    if (r.queued_at) row("Waited", `${dur(r.start - r.queued_at)} from ${clock(r.queued_at, now)}${waitedText(r.waited) ? `: ${waitedText(r.waited)}` : ""}`);
+    row("Owner", ownerCell(r.owner)); row("Kind", r.kind);
+    row(r.lanes && r.lanes.length > 1 ? "Slots" : "Lane", r.lane ? r.lanes.join(" + ") + (r.placed ? "" : " (placed by the app: the gate's log lacks this run)") : "—");
+    row("Outcome", end ? h("span", { class: `status ${end[0]}` }, end[1]) : r.code === 0 ? "exit 0" : "ended");
+    if (r.peak != null) row("Peak memory", `${gb(r.peak)}${r.mem ? ` of its ${r.mem} cap` : ""}`);
+    row("CPU time", r.cpu_s != null ? dur(r.cpu_s) : null);
+    row("Directory", r.cwd ? h("span", { class: "mono" }, home(r.cwd)) : null);
+    row("Source", r.logged ? "the gate's event log, and the journal" : "the user journal"); row("Unit", h("span", { class: "mono" }, r.unit));
+  } else if (it.kind === "lock") {
+    const p = it.p, held = it.lk.holders.includes(p); title = p.label; command = p.command;
+    row("Lock", h("span", { class: "mono" }, it.lk.label)); row("State", held ? "holds the lock" : "waiting for it");
+    row("Owner", ownerCell(p.owner)); row("Pid", String(p.pid));
+    row(held ? "Held since" : "Waiting since", `${clock(p.since, now)} (${dur(now - p.since)})`);
+    row("Estimate", estimateText(p.estimate));
+    if (p.predicted_end) row("Ends", `≈ ${clock(p.predicted_end, now)}`);
+    if (p.predicted) row("Predicted", `${clock(p.predicted.start, now)} → ${clock(p.predicted.end, now)} (flock wakes waiters in no fixed order)`);
+    if (p.stats) row("Memory", `${gb(p.stats.memory_current)} now, peak ${gb(p.stats.memory_peak)}, cap ${gb(p.stats.memory_max)}`);
+  } else if (it.kind === "remote") {
+    const j = it.j, r = it.hs.reading; title = `${it.hs.alias} · pid ${j.pid}`; command = j.command;
+    row("Machine", `${it.hs.alias}${r.host !== it.hs.alias ? ` (${r.host})` : ""}`);
+    row("Owner", ownerCell(j.owner));
+    row("Started by", j.via || "unknown: no Claude session there runs it, and no ssh connection from here started it");
+    row("User", j.user);
+    row("Started", `${clock(j.start, now)} (${dur(r.t - j.start)} ago)`);
+    row("Using", `${j.cpu.toFixed(1)} cores · ${gb(j.rss)}${j.vram_mb ? ` · VRAM ${(j.vram_mb / 1024).toFixed(1)} GB` : ""} · ${j.procs} process${j.procs > 1 ? "es" : ""}`);
+    row("Directory", j.cwd ? h("span", { class: "mono" }, home(j.cwd)) : null);
+    row("Heaviest", h("ul", { class: "reasons" }, j.top.map((p) => h("li", {},
+      `pid ${p.pid}: ${p.cpu.toFixed(1)} cores · ${gb(p.rss)}${p.vram_mb ? ` · VRAM ${(p.vram_mb / 1024).toFixed(1)} GB` : ""}`,
+      h("div", { class: "mono muted", style: "overflow-wrap:anywhere" }, p.command.slice(0, 300))))));
+  }
+  a.replaceChildren(
+    h("div", { style: "display:flex;align-items:center;gap:8px" }, h("h3", { class: "mono" }, title || "Job"), h("div", { class: "spacer" }), h("button", { class: "btn", onclick: () => { detailKey = null; renderDetail(); } }, "Close")),
+    h("dl", {}, dl),
+    command ? h("div", { style: "margin-top:12px" }, h("div", { class: "muted" }, "Command"), h("pre", { class: "mono" }, command)) : null);
+  a.hidden = false;
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { detailKey = null; renderDetail(); } });
+
+// ---------- banners ----------
+function renderBanners() {
+  const b = [];
+  if (S.error) b.push(h("div", { class: "banner critical" }, h("b", {}, "The sampler failed: "), h("pre", { class: "mono", style: "margin:4px 0 0;white-space:pre-wrap" }, S.error)));
+  if (S.gate && !S.gate.installed) b.push(h("div", { class: "banner warning" }, `The gate can't be shown: ${S.gate.error}`));
+  if (S.journal_error) b.push(h("div", { class: "banner warning" }, `History is unavailable: ${S.journal_error}`));
+  if (S.events_error) b.push(h("div", { class: "banner warning" }, `The gate's event log is unreadable, so history comes from the journal alone: ${S.events_error}`));
+  if (S.machine_log_error) b.push(h("div", { class: "banner warning" }, `The machine history can't be written: ${S.machine_log_error}`));
+  const ungated = ((S.gate && S.gate.programs) || []).filter((p) => !p.gated);
+  for (const i of ungated) b.push(h("div", { class: "banner critical" }, h("b", {}, "Ungated program: "), `pid ${i.pid} (${ownerName(i.owner)}) runs outside the gate, so no gpu job can start. `, h("span", { class: "mono muted" }, i.command.slice(0, 160))));
+  $("#banners").replaceChildren(...b);
+}
+
+function render() {
+  if (!S) return;
+  renderBanners();
+  if (S.error) return;
+  renderTiles(); renderTimeline(); renderQueue(); renderRemotes(); renderLocks(); renderHistory(); renderCapacity(); renderDetail();
+}
+renderRange(); renderCapRange(); applyTheme();
+window.addEventListener("resize", () => S && !S.error && renderTimeline());
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+poll(); setInterval(poll, 3000); setInterval(updateStatus, 1000);
+</script>
+</body>
+</html>

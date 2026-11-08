@@ -1,0 +1,33 @@
+# agent-locks settings for this machine: copy this file to ~/.config/agent-locks/config.toml and set
+# the numbers. lockview reads it every few seconds, so an edit shows up at once. Sizes are in GB
+# unless the name says otherwise.
+#
+# The gate has five kinds of job. gpu, gpu-short and gpu-solo share the [gpu] slots; cpu and
+# cpu-short share the [cpu] slots. A short kind is stopped at its limit, and in return it may also
+# take the short-only slots. A gpu-solo job takes every GPU slot at once, for timing runs that need
+# a quiet GPU. A machine without a GPU leaves out [gpu], and with it the GPU kinds.
+
+[gpu]
+slots = 2                # gpu jobs that run at once
+short_slots = 1          # extra slots that only gpu-short jobs may take
+memory_max_gb = 16       # each job's memory cap
+ram_needed_gb = 20       # RAM that must be available before a GPU job starts
+short_slot_ram_gb = 36   # RAM that must be available before a gpu-short job takes a short-only slot
+vram_needed_mb = 7000    # free VRAM a GPU job needs to start (AGENT_GATE_VRAM_MB raises it for one job)
+short_limit_min = 15     # gpu-short jobs are stopped after this long
+solo_patience_min = 120  # once a gpu-solo job has waited this long, the GPU drains for it
+# Programs that must run through the gate, by their executable's path. While one runs outside the
+# gate no GPU job starts, and a gpu-solo job waits until none runs at all.
+programs = []            # for example ["*/envs/sim/bin/python*"]
+
+[cpu]
+slots = 3
+short_slots = 1
+memory_max_gb = 10
+ram_needed_gb = 14
+short_limit_min = 2
+
+[remote]
+# Other machines to watch over ssh, by ssh alias. Each needs python3; nothing is installed there.
+# lockview reads this list when it starts, so reopen it after a change.
+hosts = []
