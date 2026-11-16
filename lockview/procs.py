@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
+PF_KTHREAD = 0x00200000  # a kernel thread, in /proc/<pid>/stat's flags
 
 
 def boot_time() -> float:
@@ -35,6 +36,8 @@ class Proc:
     sid: int = 0  # its session's leader
     ticks: int = 0  # CPU time so far, user and system, in clock ticks
     rss: int = 0  # bytes
+    reaped: int = 0  # the CPU time of the children it has reaped, in clock ticks
+    zombie: bool = False
 
     def started_at(self, btime: float) -> float:
         return btime + self.start_ticks / CLK_TCK
@@ -97,14 +100,19 @@ class Snapshot:
             try:
                 comm, rest = _stat(name)
                 with open(f"/proc/{name}/cmdline", "rb") as f:
-                    argv = tuple(a.decode(errors="replace") for a in f.read().split(b"\0") if a)
+                    raw = f.read()
+                argv = tuple(a.decode(errors="replace") for a in raw.rstrip(b"\0").split(b"\0")) if raw else ()
                 with open(f"/proc/{name}/cgroup") as f:
                     cgroup = f.read().strip().split("::", 1)[-1]
             except (OSError, ValueError, IndexError):
-                continue  # exited mid-read, or a kernel thread
-            # ppid is field 4, session 6, utime and stime 14 and 15, starttime 22, rss 24 (pages).
+                continue  # exited mid-read
+            if int(rest[6]) & PF_KTHREAD:
+                continue
+            # state is field 3, ppid 4, session 6, utime and stime 14 and 15, cutime and cstime 16 and 17,
+            # starttime 22, rss 24 (pages).
             procs[int(name)] = Proc(int(name), int(rest[1]), comm, argv, int(rest[19]), cgroup, _lock_fds(name),
-                                    int(rest[3]), int(rest[11]) + int(rest[12]), int(rest[21]) * PAGE)
+                                    int(rest[3]), int(rest[11]) + int(rest[12]), int(rest[21]) * PAGE,
+                                    int(rest[13]) + int(rest[14]), rest[0] == "Z")
         return cls(procs, boot_time(), taken)
 
     def get(self, pid: int) -> Proc | None:

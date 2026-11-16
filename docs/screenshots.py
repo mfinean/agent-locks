@@ -193,7 +193,7 @@ def state(now: float) -> dict:
         "sessions": [{"pid": 3100 + i, "name": name, "session_id": f"00000000-0000-4000-8000-00000000000{i}", "project": project,
                       "worktree": "", "status": "busy" if i < 4 else "waiting"} for i, (name, project) in enumerate(SESSIONS.items())],
         "gate": {**gs.as_dict(), "gates": server.gate_jobs(gs, est, now)},
-        "outside": [_outside(now)],
+        "outside": [_outside(now), _container_build(now)],
         "locks": held,
         "history": server.history_rows(finished, [], {}, gs, now),
         "journal_error": "", "events_error": "", "machine_log_error": "",
@@ -208,6 +208,18 @@ def _outside(now: float) -> dict:
     return {"pid": 52304, "user": "", "command": "python -m planner.sweep --scenarios 400 --workers 6", "start": now - 520,
             "cpu": 5.9, "rss": 3 * GB + GB // 4, "vram_mb": 0, "procs": 7, "cwd": f"{HOME}/planner", "session": None, "ssh": None,
             "top": [{"pid": 52306 + i, **worker} for i in range(5)], "owner": _owner("planner-3"), "via": "Claude session planner-3"}
+
+
+def _container_build(now: float) -> dict:
+    """A Bazel server in a container, compiling for a test a session runs there with docker exec."""
+    compile_ = {"command": "/usr/bin/gcc -c planner/src/rollout.cc -o rollout.o", "cpu": 0.97, "rss": GB // 3, "vram_mb": 0}
+    links = [{"kind": "bazel client", "pid": 61877}, {"kind": "docker exec", "pid": 61790, "container": "dev"}]
+    return {"pid": 41022, "user": "", "command": "bazel(planner) -Xverify:none -jar A-server.jar --workspace_directory=/home/dev/planner",
+            "start": now - 3 * 3600, "cpu": 7.8, "rss": 6 * GB, "vram_mb": 0, "procs": 19, "cwd": "/home/dev/.cache/bazel/a41c",
+            "session": None, "ssh": None, "origin": {"pid": 61790, "start": now - 400, "cwd": f"{HOME}/planner"},
+            "links": links, "container": "dev",
+            "top": [{"pid": 62101 + i, **compile_} for i in range(5)], "owner": _owner("planner-3"),
+            "via": owners.started_by("Claude session planner-3", links, "dev")}
 
 
 def _remote(now: float) -> dict:

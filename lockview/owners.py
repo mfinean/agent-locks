@@ -158,3 +158,13 @@ def owner_of(pid: int, snap: Snapshot, sessions: dict[int, Session]) -> Owner:
     """A process's owner: its nearest registered ancestor's session, and its working directory."""
     session = next((sessions[p] for p in (pid, *(a.pid for a in snap.ancestors(pid))) if p in sessions), None)
     return of(procs.cwd(pid), sessions, session)
+
+
+def started_by(origin: str, links: list[dict], container: str | None) -> str:
+    """How a job was started, from `origin`, who started the process at the far end of its links (probe.links()),
+    in through each link. A container's own job, with neither, says so."""
+    steps = [f"docker exec into {k['container']} (pid {k['pid']})" if k["kind"] == "docker exec" else f"Bazel client (pid {k['pid']})"
+             for k in reversed(links)]
+    if container and not origin and not links:
+        steps.append(f"container {container} itself: no docker exec or Bazel client here drives it")
+    return " → ".join(x for x in (origin, *steps) if x)

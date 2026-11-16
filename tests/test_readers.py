@@ -1,9 +1,11 @@
 import os
+import re
 import time
+from pathlib import Path
 
 import pytest
 
-from lockview import agent_gate, config, gate, journal, locks, owners, policy, procs, resources
+from lockview import agent_gate, config, gate, journal, locks, owners, policy, probe, procs, resources
 
 
 def test_each_slot_lists_the_kinds_that_may_take_it():
@@ -34,6 +36,12 @@ def test_gates_come_from_their_tickets():
     assert waiting.owner == owners.Owner("rover", "rover-30", "pr42")
     assert (running.state, running.slots, running.started_at, running.scope) == ("running", ["gpu.1"], 1500.0, f"/user.slice/app.slice/{unit}")
     assert [s.holder for s in gate.slot_table(cfg, list(gates.values())) if s.name.startswith("gpu")] == [2, None, None]
+
+
+def test_the_gate_is_known_by_the_program_bin_agent_gate_has_python_run():
+    program = re.search(r"-c '(.*?)'", (Path(__file__).parents[1] / "bin" / "agent-gate").read_text(), re.S)[1]
+    assert program == GATE_MAIN and agent_gate.runs_gate(("/usr/bin/python3", "-I", "-c", program, "/opt", "agent-gate", "cpu"))
+    assert not agent_gate.runs_gate(("python3", "-c", "print(1)")) and not agent_gate.runs_gate(("make",))
 
 
 def test_a_program_is_gated_when_it_runs_in_a_gates_scope():
@@ -103,8 +111,12 @@ def test_a_snapshot_reads_each_processs_cpu_time_memory_and_session():
     me = snap.procs[os.getpid()]
     assert me.ticks >= 0 and me.rss > 2**20 and me.sid == os.getsid(0)
     assert abs(snap.taken - time.time()) < 5
+    assert 2 not in snap.procs  # kthreadd: kernel threads are left out
 
 
+# What bin/agent-gate has python3 run.
+GATE_MAIN = ("\nimport os, sys\nsys.path.insert(0, sys.argv[1])\nfrom lockview.agent_gate import main\n"
+             "sys.exit(main(sys.argv[3:], os.path.basename(sys.argv[2])))")
 # Processes above the kernel's largest pid (2**22), so none of them is a real process to read.
 P = 5_000_000
 SCOPE = "/user.slice/user-1000.slice/user@1000.service/app.slice/agent-gate-21.scope"
@@ -123,7 +135,7 @@ def _machine(seconds_in=0.0):
         proc(13, 12, "python", ["python", "sweep.py"], cores=1.0, rss=2**28),
         proc(14, 12, "python", ["python", "sweep.py"], cores=1.0, rss=2**28),
         proc(20, 10, "bash", ["/bin/bash", "-c", "agent-gate cpu -- make"]),
-        proc(21, 20, "python3", ["/usr/bin/python3", "-I", "agent-gate", "cpu", "--", "make"]),
+        proc(21, 20, "python3", ["/usr/bin/python3", "-I", "-c", GATE_MAIN, "/opt/agent-locks", "agent-gate", "cpu", "--", "make"]),
         proc(22, 21, "make", ["make"], cores=4.0, rss=2**30, cgroup=SCOPE),
         proc(30, 0, "chrome", ["chrome"], cores=1.0, rss=3 * 2**30),
         proc(40, 10, "bash", ["/bin/bash", "-c", "pytest -q"], cores=0.2),
@@ -135,15 +147,49 @@ SESSIONS = {P + 10: owners.Session(P + 10, "rover-30", "id", "rover", "", "busy"
 
 
 def test_outside_the_gate_is_each_heavy_job_a_claude_session_runs_without_it():
-    jobs = gate.outside(_machine(seconds_in=3.0), _machine(), {}, SESSIONS)
+    jobs = gate.outside(_machine(seconds_in=3.0), _machine(), {}, SESSIONS, probe.Docker())
     assert [(j["pid"], j["procs"], j["cpu"], j["owner"]["session"], j["via"]) for j in jobs] == [
         (P + 11, 4, 3.0, "rover-30", "Claude session rover-30")]
     assert jobs[0]["start"] == 1100.0 and jobs[0]["rss"] == 3 * 2**28
 
 
+def test_outside_the_gate_counts_a_jobs_short_lived_processes():
+    # A session's `make` whose compiles each start and end between two samples: only make's reaped time
+    # sees them.
+    def table(reaped):
+        session = procs.Proc(P + 10, 1, "claude", ("claude",), 100 * procs.CLK_TCK, "", {}, P + 10)
+        shell = procs.Proc(P + 50, P + 10, "bash", ("/bin/bash", "-c", "make -j8"), 100 * procs.CLK_TCK, "", {}, P + 50)
+        make = procs.Proc(P + 51, P + 50, "make", ("make", "-j8"), 100 * procs.CLK_TCK, "", {}, P + 50, 0, 2**20, reaped)
+        return {p.pid: p for p in (session, shell, make)}
+
+    before = procs.Snapshot(table(0), 1000.0, 1_000_000.0)
+    now = procs.Snapshot(table(6 * procs.CLK_TCK), 1000.0, 1_000_003.0)
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 50, 2.0)]
+
+
+def test_outside_the_gate_leaves_out_a_gate_job_that_ends_and_the_time_it_leaves_with_agent_gate():
+    # The gated make, 4 cores for an hour, ends between the samples, and agent-gate, outside its scope, reaps it.
+    before = _machine(seconds_in=3600.0)
+    later = _machine(seconds_in=3603.0)
+    make = later.procs.pop(P + 22)
+    later.procs[P + 21].reaped = make.ticks
+    now = procs.Snapshot(later.procs, later.btime, later.taken)
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 11, 3.0)]
+
+
+def test_outside_the_gate_leaves_out_a_gate_job_too_short_to_see():
+    # agent-gate ran a make, 4 cores for 3 s, that started and ended between the samples: only agent-gate's
+    # reaped time shows it.
+    before, now = _machine(), _machine(seconds_in=3.0)
+    for snap in (before, now):
+        snap.procs.pop(P + 22)
+    now.procs[P + 21].reaped = 12 * procs.CLK_TCK
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 11, 3.0)]
+
+
 def test_outside_the_gate_without_a_previous_sample_counts_memory_and_vram_alone():
-    assert gate.outside(_machine(seconds_in=3.0), None, {}, SESSIONS) == []
-    assert [j["vram_mb"] for j in gate.outside(_machine(seconds_in=3.0), None, {P + 13: 900}, SESSIONS)] == [900]
+    assert gate.outside(_machine(seconds_in=3.0), None, {}, SESSIONS, probe.Docker()) == []
+    assert [j["vram_mb"] for j in gate.outside(_machine(seconds_in=3.0), None, {P + 13: 900}, SESSIONS, probe.Docker())] == [900]
 
 
 def _running(pid, kind, slot, vram_mb=0):
