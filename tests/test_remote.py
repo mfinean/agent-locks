@@ -210,7 +210,8 @@ AGENT = owners.Owner("agent-locks", "agent-locks-22")
 
 
 def _job(**kw):
-    return {"pid": 5, "start": 1000.0, "cwd": "", "session": None, "ssh": None, **kw}
+    j = {"pid": 5, "start": 1000.0, "cwd": "", "session": None, "ssh": None, **kw}
+    return {"origin": {"pid": j["pid"], "start": j["start"], "cwd": j["cwd"]}, **j}
 
 
 @pytest.mark.parametrize(("job", "clients", "owner", "via"), [

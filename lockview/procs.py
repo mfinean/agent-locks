@@ -100,7 +100,8 @@ class Snapshot:
             try:
                 comm, rest = _stat(name)
                 with open(f"/proc/{name}/cmdline", "rb") as f:
-                    argv = tuple(a.decode(errors="replace") for a in f.read().split(b"\0") if a)
+                    raw = f.read()
+                argv = tuple(a.decode(errors="replace") for a in raw.rstrip(b"\0").split(b"\0")) if raw else ()
                 with open(f"/proc/{name}/cgroup") as f:
                     cgroup = f.read().strip().split("::", 1)[-1]
             except (OSError, ValueError, IndexError):

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lockview import agent_gate, config, gate, journal, locks, owners, policy, procs, resources
+from lockview import agent_gate, config, gate, journal, locks, owners, policy, probe, procs, resources
 
 
 def test_each_slot_lists_the_kinds_that_may_take_it():
@@ -147,7 +147,7 @@ SESSIONS = {P + 10: owners.Session(P + 10, "rover-30", "id", "rover", "", "busy"
 
 
 def test_outside_the_gate_is_each_heavy_job_a_claude_session_runs_without_it():
-    jobs = gate.outside(_machine(seconds_in=3.0), _machine(), {}, SESSIONS)
+    jobs = gate.outside(_machine(seconds_in=3.0), _machine(), {}, SESSIONS, probe.Docker())
     assert [(j["pid"], j["procs"], j["cpu"], j["owner"]["session"], j["via"]) for j in jobs] == [
         (P + 11, 4, 3.0, "rover-30", "Claude session rover-30")]
     assert jobs[0]["start"] == 1100.0 and jobs[0]["rss"] == 3 * 2**28
@@ -164,7 +164,7 @@ def test_outside_the_gate_counts_a_jobs_short_lived_processes():
 
     before = procs.Snapshot(table(0), 1000.0, 1_000_000.0)
     now = procs.Snapshot(table(6 * procs.CLK_TCK), 1000.0, 1_000_003.0)
-    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS)] == [(P + 50, 2.0)]
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 50, 2.0)]
 
 
 def test_outside_the_gate_leaves_out_a_gate_job_that_ends_and_the_time_it_leaves_with_agent_gate():
@@ -174,7 +174,7 @@ def test_outside_the_gate_leaves_out_a_gate_job_that_ends_and_the_time_it_leaves
     make = later.procs.pop(P + 22)
     later.procs[P + 21].reaped = make.ticks
     now = procs.Snapshot(later.procs, later.btime, later.taken)
-    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS)] == [(P + 11, 3.0)]
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 11, 3.0)]
 
 
 def test_outside_the_gate_leaves_out_a_gate_job_too_short_to_see():
@@ -184,12 +184,12 @@ def test_outside_the_gate_leaves_out_a_gate_job_too_short_to_see():
     for snap in (before, now):
         snap.procs.pop(P + 22)
     now.procs[P + 21].reaped = 12 * procs.CLK_TCK
-    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS)] == [(P + 11, 3.0)]
+    assert [(j["pid"], j["cpu"]) for j in gate.outside(now, before, {}, SESSIONS, probe.Docker())] == [(P + 11, 3.0)]
 
 
 def test_outside_the_gate_without_a_previous_sample_counts_memory_and_vram_alone():
-    assert gate.outside(_machine(seconds_in=3.0), None, {}, SESSIONS) == []
-    assert [j["vram_mb"] for j in gate.outside(_machine(seconds_in=3.0), None, {P + 13: 900}, SESSIONS)] == [900]
+    assert gate.outside(_machine(seconds_in=3.0), None, {}, SESSIONS, probe.Docker()) == []
+    assert [j["vram_mb"] for j in gate.outside(_machine(seconds_in=3.0), None, {P + 13: 900}, SESSIONS, probe.Docker())] == [900]
 
 
 def _running(pid, kind, slot, vram_mb=0):

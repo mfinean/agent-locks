@@ -20,7 +20,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import capacity, config, estimate, events, gate, journal, locks, machinelog, owners, procs, remote, resources, runs
+from . import capacity, config, estimate, events, gate, journal, locks, machinelog, owners, probe, procs, remote, resources, runs
 
 WEB = Path(__file__).resolve().parent / "web"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "lockview"
@@ -223,6 +223,7 @@ class Sampler:
         self.oomd = resources.oomd_policy(os.getuid())
         self.gpu_idle_since: dict[int, float] = {}  # gate pid -> since when its job has had no work on the GPU
         self.last_snap: procs.Snapshot | None = None  # the previous sample's, for each process's CPU use since
+        self.docker = probe.Docker()
 
     def _refresh_history(self, now: float) -> bool:
         if now - self._journal_at < self.journal_every:
@@ -243,7 +244,7 @@ class Sampler:
         gs = gate.read(snap, sessions, now)
         lks = locks.read(snap, sessions)
         gate.flag_running(gs, lks, snap, self.gpu_idle_since, now)
-        outside = gate.outside(snap, self.last_snap, gs.gpu.proc_mb, sessions)
+        outside = gate.outside(snap, self.last_snap, gs.gpu.proc_mb, sessions, self.docker)
         self.last_snap = snap
         if refreshed and gs.installed:
             self.capacity = {h: capacity.report(self.finished, self.events, gs, now, h) for h in CAPACITY_HOURS}
@@ -278,6 +279,7 @@ class Sampler:
             "sessions": [s.__dict__ for s in sessions.values()],
             "gate": {**gs.as_dict(), "gates": jobs},
             "outside": outside,
+            "docker_error": self.docker.error,
             "locks": lock_rows(lks, est, now),
             "history": history_rows(self.finished, self.history.lost(), self.observed.units, gs, now),
             "journal_error": self.history.error,
