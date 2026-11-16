@@ -177,7 +177,7 @@ def state(now: float) -> dict:
     gpu = resources.Gpu(True, "", 24564, 18750, 91)
     gs = gate.GateState(True, "", cfg, gates, gate.slot_table(cfg, gates), [], 27, gpu)
     gate.explain_waits(gs, now)
-    est = server.estimator(finished, {})
+    est = server.estimator(finished, {}, {})
 
     home = str(Path.home())
     holder = locks.Party(51877, now - 260, "python tools/bake_assets.py --all", owners.Owner("sim-assets", "sim-assets-2"))
@@ -195,7 +195,7 @@ def state(now: float) -> dict:
         "gate": {**gs.as_dict(), "gates": server.gate_jobs(gs, est, now)},
         "outside": [_outside(now), _container_build(now)],
         "locks": held,
-        "history": server.history_rows(finished, [], {}, gs, now),
+        "history": server.history_rows(finished, [], {}, {}, gs, now),
         "journal_error": "", "events_error": "", "machine_log_error": "",
         "capacity": {h: capacity.report(finished, log, gs, now, h) for h in server.CAPACITY_HOURS},
         "remotes": {"config": "~/.config/agent-locks/config.toml", "hosts": [_remote(now)]},
