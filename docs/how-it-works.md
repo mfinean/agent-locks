@@ -128,7 +128,7 @@ default browser.
 | `config.toml` | the kinds, slots, memory caps, thresholds, gated programs and other machines |
 | the gate's tickets | each job's kind, state, slots, queue time and owner, and whether it runs an older copy of the gate |
 | each job's cgroup | memory now, its peak and its cap; VRAM comes from `nvidia-smi` per process |
-| `/proc/locks` and open file descriptors | holders and waiters of other exclusive `flock` locks |
+| `/proc/locks`, open file descriptors and their `fdinfo` | holders and waiters of other exclusive `flock` locks: a holder is a process whose open file holds the lock, not every one with the file open |
 | each process's `/proc/<pid>/stat` | its CPU time, memory and session, for heavy jobs outside the gate |
 | the gate's event log | each finished job's kind, slots, waits by reason, exit code and peak memory, two weeks back |
 | `journalctl --user` | every finished `systemd-run` scope: start, end, CPU time and OOM kills |
