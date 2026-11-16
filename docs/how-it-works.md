@@ -130,6 +130,8 @@ default browser.
 | each job's cgroup | memory now, its peak and its cap; VRAM comes from `nvidia-smi` per process |
 | `/proc/locks`, open file descriptors and their `fdinfo` | holders and waiters of other exclusive `flock` locks: a holder is a process whose open file holds the lock, not every one with the file open |
 | each process's `/proc/<pid>/stat` | its CPU time, memory and session, for heavy jobs outside the gate |
+| each process's `NSpid`, working directory and mount namespace | which processes are containers' inits, and which Bazel client a Bazel server works for |
+| the Docker API, `/var/run/docker.sock` | each container's name, and the command `docker exec` gave each process it started |
 | the gate's event log | each finished job's kind, slots, waits by reason, exit code and peak memory, two weeks back |
 | `journalctl --user` | every finished `systemd-run` scope: start, end, CPU time and OOM kills |
 | `~/.claude/sessions/*.json` | which Claude Code session started a process |
@@ -155,9 +157,47 @@ while the job ran (kept in `~/.local/state/lockview/observed.json`), or else the
 
 lockview applies the probe's test (see [Other machines](#other-machines)) to this machine too. A job
 is a process tree that something started: the topmost process below an init, sshd, tmux, screen, a
-Claude session or an interactive shell, with its descendants. It is heavy if it uses a GPU, half a
-core or 2 GB, with its CPU use measured between two samples. Processes in a gate job's scope are left
-out, and so is any job no Claude session started, such as the desktop's own apps.
+Claude session or an interactive shell, with its descendants. A container's init is one if all it does
+is start or wait (`docker-init`, `tini`, `sleep infinity`, an interactive shell); one that does the
+work, as in `docker run img make`, is the job. It is heavy if it
+uses a GPU, half a core or 2 GB, with its CPU use measured between two samples. agent-gate is a
+boundary too, as what it runs is a gate job. Gate jobs are left out, with any job they drive. Jobs in
+containers and jobs driven from another job are listed, and so is each job a Claude session started;
+any other job, such as the desktop's own apps, is left out.
+
+A job's CPU use counts processes that start and end between two samples, such as a make's compiles:
+each process is also charged the CPU time of the children it reaped since the last sample, less what
+those children had used by then, which that sample counted. Sessions, shells and the other processes
+that start jobs are charged their own time alone, since the children they reap were jobs of their own,
+and so is a process in the interval it reaps one of them: the shell that ran agent-gate, as agent-gate
+ends with its gate job. A process that is exiting is still read, so its time is counted once, however
+the samples fall.
+
+### Jobs in containers and under Bazel
+
+Some jobs are driven from another job, and belong to whoever started that one:
+
+- **`docker exec`.** The process an exec starts is a child of the container's shim, not of the
+  `docker` client that asked for it. The Docker API gives the exec's command and the process it
+  started. Its client is the `docker exec` here for that container with that command. Of several,
+  the newest exec takes the newest client that started before it, and so on back, as execs start in
+  the order their clients did.
+- **A Bazel server** runs as a daemon under its own init, and works for the Bazel client whose command
+  it runs. Its client is the `bazel` (or apt's `bazel-real`) whose directory is in the server's
+  workspace (the innermost, if workspaces nest), in its mount namespace, and under its
+  `--output_user_root` and with its `--output_base` if the client gives them. A client that fits two
+  servers drives neither, as nothing tells which. Of a server's clients, the oldest drives it, and the
+  others wait for it. bazelisk runs the client as a `bazel` of its own, so a client that runs another
+  isn't one.
+
+Links chain: a test's Bazel server is driven by the Bazel client in the exec'd test, which is driven
+by the `docker exec` a Claude session runs. The job belongs to that session, and "Started by" lists
+each link. A container's own job, which nothing here drives (a service it runs, or a Bazel server
+between commands), is listed under the container's name.
+
+The Docker API is asked about each container and each exec'd process once, in about 5 ms.
+Without it, containers go by their ids and execs aren't traced to their clients, and the page
+says why.
 
 ### Estimates and predicted starts
 
@@ -215,12 +255,16 @@ reading every 3 seconds. Nothing is installed on the host. When lockview exits, 
 fails and it exits too.
 
 The probe reports the host's RAM, memory pressure, GPUs, CPU use, and its heavy jobs: process trees
-using a GPU, half a core or 2 GB. A job's owner is, in order:
+using a GPU, half a core or 2 GB. It links jobs in containers and under Bazel to the processes that
+drive them, as lockview does here (see [Jobs in containers and under Bazel](#jobs-in-containers-and-under-bazel)).
+A job's owner is the owner of the process at the far end of its links, its origin, or of its own
+root without any. In order, that is:
 
-1. the Claude Code session on that host that it runs under,
-2. the local ssh client whose connection started it, found from `SSH_CONNECTION` and the client's
-   socket, and that client's session, or
-3. its directory's project.
+1. the Claude Code session on that host that the origin runs under,
+2. the local ssh client whose connection started the origin, found from `SSH_CONNECTION` and the
+   client's socket, and that client's session,
+3. for a container's own job, the container, or
+4. the project of the origin's directory.
 
 ### Limits
 
@@ -230,8 +274,16 @@ using a GPU, half a core or 2 GB. A job's owner is, in order:
   guessed kind. The timeline puts it in a free slot, marked `?`, which shows how busy the slots were
   but not which slot it had.
 - **Very short scopes** can end without the journal's CPU-time line, and are left out.
+- **Gate runs shorter than a sample.** An agent-gate that starts and ends between two samples is
+  never seen, so for that sample its gate job's CPU counts toward the job that ran agent-gate.
 - **Detached jobs here.** A job started with `setsid nohup … &` leaves its session's process tree,
   so it isn't listed outside the gate.
+- **Execs without a client.** `docker exec -d` leaves no client to trace, and neither
+  `docker compose exec` nor a client given options before `exec` (`docker -H … exec`, `--context`)
+  is read as one, so the job is the container's.
+- **Containers run as root.** lockview reads another user's processes' directories and mount
+  namespaces only as root, so a Bazel server in a container whose processes run as root isn't linked
+  to its client.
 - **Detached remote jobs.** lockview sees a job's ssh client only if the client is still running at
   one of its readings. It remembers clients for a day, which covers `setsid nohup … &`.
 - **Other machines' history** isn't kept: lockview shows what runs there now.

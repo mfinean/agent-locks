@@ -127,19 +127,27 @@ class Client:
 
 
 def owner_of(j: dict, home: str, alias: str, clients: dict[tuple, Client], now: float) -> tuple[owners.Owner, str]:
-    """Who started a job on another machine, and how that is known. clients: (address, port) -> the
-    ssh client here that connected from there, live (last seen `now`) or remembered."""
+    """Who started a job on another machine, and how that is known: who started its origin, the process that
+    drives it (probe.links()), and the links in from there. clients: (address, port) -> the ssh client here
+    that connected from there, live (last seen `now`) or remembered."""
+    owner, origin = _origin_owner(j, home, alias, clients, now)
+    return owner, owners.started_by(origin, j.get("links") or [], j.get("container"))
+
+
+def _origin_owner(j: dict, home: str, alias: str, clients: dict[tuple, Client], now: float) -> tuple[owners.Owner, str]:
     if s := j.get("session"):
         return owners.Owner(_project(s["cwd"], home), s["name"]), f"Claude session {s['name']} on {alias}"
     if j.get("ssh"):
         ip, port = _ip(j["ssh"][0]), j["ssh"][1]
         c = clients.get((ip, port))
-        if c and c.started - SKEW <= j["start"] <= c.last_seen + SKEW:
+        if c and c.started - SKEW <= j["origin"]["start"] <= c.last_seen + SKEW:
             return c.owner, f"ssh from here, pid {c.pid}" + ("" if c.last_seen == now else ", which has since exited")
         if any(addr == ip for addr, _ in clients):
             return owners.Owner(""), "ssh from here, by a client that exited before lockview saw it"
         return owners.Owner(""), f"ssh from {ip}"
-    return owners.Owner(_project(j.get("cwd", ""), home)), ""
+    if j.get("container") and not j.get("links"):
+        return owners.Owner(j["container"]), ""
+    return owners.Owner(_project(j["origin"]["cwd"], home)), ""
 
 
 def _project(cwd: str, home: str) -> str:

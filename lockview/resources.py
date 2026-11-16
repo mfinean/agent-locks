@@ -36,6 +36,14 @@ def cpu_times(stat: Path = Path("/proc/stat")) -> tuple[int, int]:
     return busy, busy + idle + iowait
 
 
+def busy_pct(before: tuple[int, int] | None, after: tuple[int, int]) -> float | None:
+    """The share of CPU time spent busy between two cpu_times() readings, in percent; None without two."""
+    if before is None:
+        return None
+    busy, total = after[0] - before[0], after[1] - before[1]
+    return round(100 * busy / total, 1) if total > 0 else None
+
+
 @dataclass
 class Gpu:
     ok: bool

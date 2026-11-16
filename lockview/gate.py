@@ -143,31 +143,46 @@ def find_programs(snap: Snapshot, sessions: dict[int, owners.Session], patterns:
     return out
 
 
+def _gated(snap: Snapshot, pid: int) -> bool:
+    return bool(agent_gate.IN_SCOPE.search(snap.procs[pid].cgroup))
+
+
 def _probe_view(snap: Snapshot) -> dict[int, dict]:
-    """The snapshot's processes outside every gate job's scope, in probe.py's form. Kernel threads have no argv."""
+    """The snapshot's processes in probe.py's form. agent-gate is a boundary: what it runs is a gate job."""
     return {p.pid: {"ppid": p.ppid, "sid": p.sid, "comm": p.comm, "argv": list(p.argv), "uid": None, "ticks": p.ticks,
-                    "start": p.start_ticks, "rss": p.rss}
-            for p in snap.procs.values() if p.argv and not agent_gate.IN_SCOPE.search(p.cgroup)}
+                    "reaped": p.reaped, "start": p.start_ticks, "rss": p.rss, "zombie": p.zombie,
+                    "boundary": agent_gate.runs_gate(p.argv)}
+            for p in snap.procs.values()}
 
 
-def outside(snap: Snapshot, before: Snapshot | None, vram_mb: dict[int, int], sessions: dict[int, owners.Session]) -> list[dict]:
-    """The heavy jobs Claude sessions run outside the gate.
+def outside(snap: Snapshot, before: Snapshot | None, vram_mb: dict[int, int], sessions: dict[int, owners.Session],
+            docker: probe.Docker) -> list[dict]:
+    """The heavy jobs run outside the gate: those Claude sessions run, and those in containers or driven from
+    another job (probe.links()).
 
     The test is the one lockview applies to other machines (probe.py): a process tree that something started,
-    using a GPU, half a core or 2 GB. Gate jobs' scopes are left out, and so is any job no Claude session
-    started, such as the desktop's own apps. before: the previous sample's snapshot, for CPU use; without
-    it, only memory and VRAM count.
+    using a GPU, half a core or 2 GB. A job belongs to whoever started its origin, the process that drives it;
+    a container's own job, to the container. Gate jobs are left out, with what they drive, and so is any other
+    job no Claude session started, such as the desktop's own apps. before: the previous sample's snapshot, for
+    CPU use; without it, only memory and VRAM count.
     """
     view = _probe_view(snap)
+    probe.mark_container_inits(view)
+    docker.update(view)
     cpu = probe.cores_used(_probe_view(before), view, snap.taken - before.taken) if before else {}
     out = []
-    for j in probe.jobs(view, cpu, vram_mb, {}, lambda _uid: ""):
-        if probe.is_boundary(j["pid"], view[j["pid"]]):
-            continue  # a session, a shell or a terminal itself, rather than a job one started
-        owner = owners.owner_of(j["pid"], snap, sessions)
-        if owner.session:
+    for j in probe.jobs(view, cpu, vram_mb, {}, lambda _uid: "", links=probe.links(view, docker), names=docker.names):
+        origin = j["origin"]["pid"]
+        if probe.is_boundary(j["pid"], view[j["pid"]]) or _gated(snap, j["pid"]) or _gated(snap, origin):
+            continue  # a session, a shell or a terminal itself, rather than a job one started; or a gate job's
+        if j["container"] and not j["links"]:
+            owner = owners.Owner(j["container"])
+        else:
+            owner = owners.owner_of(origin, snap, sessions)
+        if owner.session or j["container"] or j["links"]:
             out.append({**j, "start": snap.btime + j["start"] / procs.CLK_TCK, "owner": owner.as_dict(),
-                        "via": f"Claude session {owner.session}"})
+                        "origin": {**j["origin"], "start": snap.btime + j["origin"]["start"] / procs.CLK_TCK},
+                        "via": owners.started_by(f"Claude session {owner.session}" if owner.session else "", j["links"], j["container"])})
     return out
 
 
