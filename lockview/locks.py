@@ -2,7 +2,9 @@
 
 /proc/locks says which inodes are locked and which processes are blocked on them; its holder pid is
 often a `flock` process that has already exited (`exec 9>f; flock 9`), so holders are found the other
-way round: every live process with the file open that isn't itself waiting, nor the parent of a waiter.
+way round: the processes whose open file holds the lock, by the lock line /proc/<pid>/fdinfo shows for
+it. A process with the file open that waits for the lock, or hasn't taken it yet (a queue that opens it
+early and locks it with `flock -n` once at its head), has no such line.
 """
 
 from __future__ import annotations
@@ -100,7 +102,7 @@ def read(snap: Snapshot, sessions: dict[int, owners.Session], proc_locks: str | 
         waiting = set(blocked)
         for b in blocked:  # the shell that ran `flock 9` waits with it
             waiting.update(a.pid for a in snap.ancestors(b) if a.pid in pids)
-        holding = {pid for pid in pids if pid not in waiting}
+        holding = {pid for pid in pids if key in snap.procs[pid].held_locks}
         # Report each group once, at its outermost opener (children inherit the open file).
         roots = {pid for pid in holding if snap.procs[pid].ppid not in holding}
         lock = Lock(path)

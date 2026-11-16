@@ -1,5 +1,7 @@
 import os
 import re
+import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -329,3 +331,50 @@ def test_a_short_job_starts_during_a_drain_only_while_a_gpu_job_runs(runner, dra
     assert any(r.startswith("GPU draining") for r in long.reasons)
     assert any(r.startswith("GPU draining") for r in short.reasons) == drains
     assert not any("older" in r for r in short.reasons)  # the waiting gpu job can't start before the solo job
+
+
+def _until(pred, timeout=10.0):
+    deadline = time.time() + timeout
+    while not (value := pred()):
+        assert time.time() < deadline, "timed out"
+        time.sleep(0.02)
+    return value
+
+
+def test_a_lock_is_held_by_the_process_whose_open_file_holds_it_not_by_every_opener(tmp_path, monkeypatch):
+    # A takes the lock with flock -n, as a queue does at its head; B has the file open while it queues, as
+    # a queueing wrapper does; C blocks in flock. Only A holds it, and C waits.
+    monkeypatch.setattr(locks, "HOME", str(tmp_path))
+    path = tmp_path / "gpu.lock"
+
+    def lock():
+        return next((lk for lk in locks.read(procs.Snapshot.take(), {}) if lk.path == str(path)), None)
+
+    a = _shell(f"exec 9>{path}; flock -n 9 && sleep 30")
+    b = c = None
+    try:
+        _until(lambda: (lk := lock()) and lk.holders)
+        b = _shell(f"exec 9>{path}; sleep 30")
+        c = _shell(f"exec 9>{path}; flock 9; sleep 30")
+        _until(lambda: str(path) in _fd_targets(b.pid))
+        lk = _until(lambda: (lk := lock()) and lk.waiters and lk)
+        assert ([h.pid for h in lk.holders], [w.pid for w in lk.waiters]) == ([a.pid], [c.pid])
+    finally:
+        for p in (a, b, c):
+            if p:
+                os.killpg(p.pid, signal.SIGKILL)  # the shell and its children, which hold the file open
+                p.wait()
+
+
+def _shell(script):
+    return subprocess.Popen(["bash", "-c", script], start_new_session=True)
+
+
+def _fd_targets(pid):
+    out = []
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            out.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
+        except OSError:
+            pass
+    return out

@@ -38,6 +38,7 @@ class Proc:
     rss: int = 0  # bytes
     reaped: int = 0  # the CPU time of the children it has reaped, in clock ticks
     zombie: bool = False
+    held_locks: frozenset[tuple[int, int]] = frozenset()  # the (st_dev, st_ino) of lock_fds its open files hold a flock on
 
     def started_at(self, btime: float) -> float:
         return btime + self.start_ticks / CLK_TCK
@@ -60,25 +61,34 @@ def read_stat(pid: int | str) -> tuple[int, str, int]:
     return int(rest[1]), comm, int(rest[19])
 
 
-def _lock_fds(pid: str) -> dict[str, tuple[int, int]]:
+def _lock_fds(pid: str) -> tuple[dict[str, tuple[int, int]], frozenset[tuple[int, int]]]:
+    """The .lock files a process has open, path -> (st_dev, st_ino), and those its open files hold a flock on.
+    /proc/<pid>/fdinfo/<fd> has a lock line for a lock held through that open file, and none for a lock the
+    file waits for or never took."""
     out: dict[str, tuple[int, int]] = {}
+    held: set[tuple[int, int]] = set()
     try:
         fds = os.listdir(f"/proc/{pid}/fd")
     except OSError:
-        return out
+        return out, frozenset()
     for fd in fds:
         try:
             target = os.readlink(f"/proc/{pid}/fd/{fd}")
         except OSError:
             continue
-        if not target.endswith(".lock") or target in out:
+        if not target.endswith(".lock"):
             continue
         try:
             st = os.stat(target)
+            with open(f"/proc/{pid}/fdinfo/{fd}") as f:
+                holds = any(line.startswith("lock:") and " FLOCK " in line for line in f)
         except OSError:
             continue
-        out[target] = (st.st_dev, st.st_ino)
-    return out
+        key = (st.st_dev, st.st_ino)
+        out.setdefault(target, key)
+        if holds:
+            held.add(key)
+    return out, frozenset(held)
 
 
 class Snapshot:
@@ -108,11 +118,12 @@ class Snapshot:
                 continue  # exited mid-read
             if int(rest[6]) & PF_KTHREAD:
                 continue
+            lock_fds, held = _lock_fds(name)
             # state is field 3, ppid 4, session 6, utime and stime 14 and 15, cutime and cstime 16 and 17,
             # starttime 22, rss 24 (pages).
-            procs[int(name)] = Proc(int(name), int(rest[1]), comm, argv, int(rest[19]), cgroup, _lock_fds(name),
+            procs[int(name)] = Proc(int(name), int(rest[1]), comm, argv, int(rest[19]), cgroup, lock_fds,
                                     int(rest[3]), int(rest[11]) + int(rest[12]), int(rest[21]) * PAGE,
-                                    int(rest[13]) + int(rest[14]), rest[0] == "Z")
+                                    int(rest[13]) + int(rest[14]), rest[0] == "Z", held_locks=held)
         return cls(procs, boot_time(), taken)
 
     def get(self, pid: int) -> Proc | None:

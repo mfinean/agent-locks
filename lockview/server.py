@@ -5,8 +5,9 @@ GET /api/state   the latest sample as JSON
 
 History comes from the gate's event log, joined with the journal (runs.py). Neither knows which
 session started a job, nor which lock a `flock … systemd-run` scope ran under; the sampler sees
-those live and keeps them in ~/.local/state/lockview/observed.json. Beside it, machinelog.py keeps a
-history of the machine's RAM, memory pressure, GPU and CPU use.
+those live and keeps them in ~/.local/state/lockview/observed.json. The journal also lacks the end of
+most runs under a lock, so the sampler keeps its own record of each lock holder it sees, in
+holds.json beside it. machinelog.py keeps a history of the machine's RAM, memory pressure, GPU and CPU use.
 remote.py watches the other machines listed in config.toml (config.py) over ssh.
 """
 
@@ -27,10 +28,12 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
 WINDOW = 24 * 3600  # history sent to the page
 KEEP = 14 * 86400  # observations kept
 CAPACITY_HOURS = (24, 72, 168)  # the windows the capacity view offers
+UNSEEN_S = 30.0  # a hold last seen this long before lockview saw it gone ended while lockview was closed
 
 
 class Observed:
-    """unit -> what was seen live: its owner, and the lock a lock-held run ran under."""
+    """key -> what was seen live, kept for KEEP after it was last `seen`: by unit, its owner and the lock a
+    lock-held run ran under (observed.json); or, by lock holder, its hold (holds.json, note_holds)."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -40,11 +43,11 @@ class Observed:
             self.units = {}
         self.dirty = False
 
-    def note(self, unit: str, **fields) -> None:
-        old = self.units.get(unit, {})
+    def note(self, key: str, /, **fields) -> None:
+        old = self.units.get(key, {})
         new = {**old, **fields}
         if new != old:
-            self.units[unit] = new
+            self.units[key] = new
             self.dirty = True
 
     def save(self, now: float) -> None:
@@ -62,15 +65,64 @@ def _unit(scope: str) -> str:
     return scope.rsplit("/", 1)[-1]
 
 
-def estimator(finished: list[runs.Finished], observed: dict[str, dict]) -> estimate.Estimator:
-    """Estimates from every run that ended by itself: one cut short says only that it takes at least that long."""
-    return estimate.Estimator(
-        (f.keys, f.end - f.start, f.kind or ("lock" if "lock" in observed.get(f.unit, {}) else None))
-        for f in finished if not f.cut_short
-    )
+def note_holds(holds: Observed, lks: list[locks.Lock], snap: procs.Snapshot, now: float, first_sample: bool) -> None:
+    """Record each lock holder seen, keyed by its lock, pid and the pid's start: when it was first and last
+    seen holding, and once it holds no more, when lockview first saw that. systemd logs a scope's end only
+    once it has used a second or so of CPU, so the journal lacks most runs under a lock (a `docker exec`
+    client uses less); these records give their ends, to a sample. first_sample: this is lockview's first
+    sample since it opened, so a hold seen now may have begun before."""
+    held = set()
+    for lk in lks:
+        for h in lk.holders:
+            p = snap.get(h.pid)
+            key = f"{lk.path}:{h.pid}:{p.start_ticks if p else 0}"
+            held.add(key)
+            first = holds.units.get(key, {})
+            holds.note(key, lock=lk.path, command=h.command, owner=h.owner.as_dict(), unit=_unit(h.scope) if h.scope else "",
+                       since=h.since, first=first.get("first", now), seen=now, at_start=first.get("at_start", first_sample))
+    for key, d in list(holds.units.items()):
+        if key not in held and "gone" not in d:
+            holds.note(key, gone=now)
 
 
-def history_rows(finished: list[runs.Finished], lost: list[journal.Run], observed: dict[str, dict],
+def _start_unseen(d: dict) -> bool:
+    """A hold with no scope to date it, held already when lockview opened."""
+    return d["at_start"] and not d["unit"]
+
+
+def _end_unseen(d: dict) -> bool:
+    """A finished hold that lockview last saw well before it saw it gone: it ended while lockview was closed."""
+    return d["gone"] - d["seen"] > UNSEEN_S
+
+
+def _whole(d: dict) -> bool:
+    """A finished hold that lockview saw begin and end: the time between is its run."""
+    return not _start_unseen(d) and not _end_unseen(d)
+
+
+def _ended_holds(holds: dict[str, dict]) -> list[dict]:
+    """The holds that have ended and that lockview saw in two samples or more: a queue that takes the lock
+    for a moment to look, and gives it back, is seen in one at most."""
+    return [d for d in holds.values() if "gone" in d and d["seen"] > d["first"]]
+
+
+def _hold_start(d: dict) -> float:
+    """A hold under a scope of its own starts as the scope does; any other, when lockview first saw it, as its
+    holder's start includes its time in a queue."""
+    return d["since"] if d["unit"] else d["first"]
+
+
+def estimator(finished: list[runs.Finished], observed: dict[str, dict], holds: dict[str, dict]) -> estimate.Estimator:
+    """Estimates from every run that ended by itself: one cut short says only that it takes at least that long.
+    Lock holders' come from the holds lockview saw whole, by the holder's own command, as lock_rows asks."""
+    return estimate.Estimator([
+        *((f.keys, f.end - f.start, f.kind or ("lock" if "lock" in observed.get(f.unit, {}) else None))
+          for f in finished if not f.cut_short),
+        *((estimate.keys(d["command"]), d["seen"] - _hold_start(d), "lock") for d in _ended_holds(holds) if _whole(d)),
+    ])
+
+
+def history_rows(finished: list[runs.Finished], lost: list[journal.Run], observed: dict[str, dict], holds: dict[str, dict],
                  gs: gate.GateState, now: float) -> list[dict]:
     """Finished gated and lock-held runs in the window, each in a lane.
 
@@ -79,6 +131,8 @@ def history_rows(finished: list[runs.Finished], lost: list[journal.Run], observe
     slots and then the other kind's: the gate never ran more jobs than it has slots, so a guess
     that would overfill a lane is wrong. That shows occupancy, not which numbered slot a run
     really had; a run that fits nowhere stays out of the timeline.
+
+    A lock-held run is the journal's, if it logged the run's end; else lockview's record of the hold.
     """
     busy: dict[str, list[tuple[float, float]]] = {s.name: [] for s in gs.slots}
     short_only = gate.short_only(gs.slots)  # a run with a guessed kind is never a short one
@@ -121,6 +175,18 @@ def history_rows(finished: list[runs.Finished], lost: list[journal.Run], observe
             "queued_at": f.queued_at, "waited": f.waited, "code": f.code, "peak": f.peak,
             "mem": gs.config.kinds[kind].mem if gs.config and kind in gs.config.kinds else None,
             "limit_stop": bool(gs.config) and f.stopped_at(gs.config.limit(f.kind)),
+        })
+    journal_units = {f.unit for f in finished}
+    for d in _ended_holds(holds):
+        if d["seen"] < now - WINDOW or d["unit"] in journal_units:
+            continue
+        lane = "lock:" + d["lock"].replace(str(Path.home()), "~")
+        rows.append({
+            "unit": d["unit"], "lane": lane, "lanes": [lane], "placed": True, "logged": False, "kind": "lock", "source": "holds",
+            "owner": d["owner"], "command": d["command"][:400], "label": estimate.keys(d["command"]).task, "cwd": "",
+            "start": _hold_start(d), "end": d["seen"], "cpu_s": None, "outcome": "", "cut_short": False,
+            "queued_at": None, "waited": {}, "code": None, "peak": None, "mem": None, "limit_stop": False,
+            "start_unseen": _start_unseen(d), "end_unseen_until": d["gone"] if _end_unseen(d) else None,
         })
     for r in lost:
         if r.gated and r.start > now - WINDOW:
@@ -209,6 +275,8 @@ class Sampler:
         self.events = events.EventLog()
         self.finished: list[runs.Finished] = []
         self.observed = Observed(STATE_DIR / "observed.json")
+        self.holds = Observed(STATE_DIR / "holds.json")
+        self._sampled = False  # whether a sample has run since lockview opened
         self.machine_log = machinelog.MachineLog(STATE_DIR)
         try:
             hosts = config.load().remote.hosts
@@ -223,6 +291,7 @@ class Sampler:
         self.oomd = resources.oomd_policy(os.getuid())
         self.gpu_idle_since: dict[int, float] = {}  # gate pid -> since when its job has had no work on the GPU
         self.last_snap: procs.Snapshot | None = None  # the previous sample's, for each process's CPU use since
+        self.last_cpu: tuple[int, int] | None = None  # the previous sample's resources.cpu_times(), for CPU use since
         self.docker = probe.Docker()
 
     def _refresh_history(self, now: float) -> bool:
@@ -232,7 +301,7 @@ class Sampler:
         self.history.update()
         self.events.update(now)
         self.finished = runs.merge(self.history, self.events)
-        self.estimator = estimator(self.finished, self.observed.units)
+        self.estimator = estimator(self.finished, self.observed.units, self.holds.units)
         return True
 
     def sample(self) -> dict:
@@ -258,12 +327,18 @@ class Sampler:
                 if h.scope:
                     self.observed.note(_unit(h.scope), lock=lk.path, owner=h.owner.as_dict(), seen=now)
         self.observed.save(now)
+        note_holds(self.holds, lks, snap, now, first_sample=not self._sampled)
+        self._sampled = True
+        self.holds.save(now)
 
         jobs = gate_jobs(gs, est, now)
         session_cg = resources.session_cgroup(snap.procs[os.getpid()].cgroup) if os.getpid() in snap.procs else None
         psi = resources.pressure(session_cg / "memory.pressure") if session_cg else {}
         load = os.getloadavg()
-        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], resources.cpu_times()))
+        cpu = resources.cpu_times()
+        cpu_pct = resources.busy_pct(self.last_cpu, cpu)
+        self.last_cpu = cpu
+        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], cpu))
         return {
             "now": now,
             "sample_ms": round(1000 * (time.time() - t0)),
@@ -275,13 +350,14 @@ class Sampler:
                 "oomd": self.oomd.__dict__,
                 "load": load,
                 "cpus": os.cpu_count(),
+                "cpu_pct": cpu_pct,
             },
             "sessions": [s.__dict__ for s in sessions.values()],
             "gate": {**gs.as_dict(), "gates": jobs},
             "outside": outside,
             "docker_error": self.docker.error,
             "locks": lock_rows(lks, est, now),
-            "history": history_rows(self.finished, self.history.lost(), self.observed.units, gs, now),
+            "history": history_rows(self.finished, self.history.lost(), self.observed.units, self.holds.units, gs, now),
             "journal_error": self.history.error,
             "events_error": self.events.error,
             "machine_log_error": self.machine_log.error,

@@ -1,6 +1,6 @@
 """Finished runs from the gate's log and the journal, and the history rows the page draws from them."""
 
-from lockview import estimate, events, gate, journal, owners, policy, resources, runs, server
+from lockview import estimate, events, gate, journal, locks, owners, policy, procs, resources, runs, server
 
 KINDS = {"gpu": policy.Kind("gpu", 2, "16G", 20), "gpu-short": policy.Kind("gpu", 3, "16G", 20, 900),
          "gpu-solo": policy.Kind("gpu", 3, "16G", 20), "cpu": policy.Kind("cpu", 3, "10G", 14),
@@ -75,7 +75,7 @@ def test_a_history_row_is_owned_as_the_gate_logged_it_else_as_seen_live_else_by_
     seen = {"project": "boards", "session": "s", "worktree": ""}
     jobs = [_job(1, owner=queued), _job(2, start=2000, end=2600, slots=("gpu.2",)), _job(3, start=3000, end=3600, cwd="")]
     observed = {"agent-gate-1.scope": {"owner": seen}, "agent-gate-2.scope": {"owner": seen}}
-    rows = {r["unit"]: r["owner"] for r in server.history_rows(runs.merge(_journal(), _log(*jobs)), [], observed, _gs(), NOW)}
+    rows = {r["unit"]: r["owner"] for r in server.history_rows(runs.merge(_journal(), _log(*jobs)), [], observed, {}, _gs(), NOW)}
     assert rows == {"agent-gate-1.scope": queued, "agent-gate-2.scope": seen, "agent-gate-3.scope": {"project": "", "session": "", "worktree": ""}}
 
 
@@ -100,7 +100,7 @@ def test_history_rows_keep_logged_slots_and_place_the_rest_around_them():
                  _started(1500.0, "run-u1.scope", "/usr/bin/bash chain.sh"), _consumed(3000.0, "run-u1.scope"),
                  _started(1500.0, "run-u2.scope", "/usr/bin/python3 other.py"), _consumed(3000.0, "run-u2.scope"))
     observed = {"run-u1.scope": {"lock": "/x/heavy.lock"}, "agent-gate-3.scope": {"owner": {"project": "boards", "session": "s", "worktree": ""}}}
-    rows = {r["unit"]: r for r in server.history_rows(runs.merge(h, _log(*logged)), [], observed, _gs(), NOW)}
+    rows = {r["unit"]: r for r in server.history_rows(runs.merge(h, _log(*logged)), [], observed, {}, _gs(), NOW)}
     assert sorted(rows) == ["agent-gate-1.scope", "agent-gate-2.scope", "agent-gate-3.scope", "agent-gate-8.scope", "agent-gate-9.scope", "run-u1.scope"]
     one, short, cpu, guessed = (rows[f"agent-gate-{p}.scope"] for p in (1, 2, 3, 9))
     assert (one["lanes"], one["placed"], one["kind"], one["mem"]) == (["gpu.1"], True, "gpu", "16G")
@@ -115,13 +115,13 @@ def test_history_rows_keep_logged_slots_and_place_the_rest_around_them():
 
 
 def test_a_short_job_stopped_early_is_not_said_to_have_hit_the_limit():
-    rows = server.history_rows(runs.merge(_journal(), _log(_job(2, "gpu-short", start=2000, end=2300, code=143))), [], {}, _gs(), NOW)
+    rows = server.history_rows(runs.merge(_journal(), _log(_job(2, "gpu-short", start=2000, end=2300, code=143))), [], {}, {}, _gs(), NOW)
     assert rows[0]["limit_stop"] is False
 
 
 def test_a_cpu_short_job_hits_its_own_limit_and_a_cpu_job_has_none():
     jobs = [_job(2, "cpu-short", start=2000, end=2121, slots=["cpu.4"], code=143), _job(3, "cpu", start=2000, end=2300, slots=["cpu.1"], code=143)]
-    rows = {r["unit"]: r for r in server.history_rows(runs.merge(_journal(), _log(*jobs)), [], {}, _gs(), NOW)}
+    rows = {r["unit"]: r for r in server.history_rows(runs.merge(_journal(), _log(*jobs)), [], {}, {}, _gs(), NOW)}
     assert (rows["agent-gate-2.scope"]["lanes"], rows["agent-gate-2.scope"]["limit_stop"]) == (["cpu.4"], True)
     assert rows["agent-gate-3.scope"]["limit_stop"] is False
 
@@ -161,8 +161,64 @@ def test_estimates_leave_out_runs_cut_short_and_count_lock_runs_as_lock_jobs():
                    for e in (_started(10.0, f"run-u{i}.scope", f"/usr/bin/bash chain{i}.sh"), _consumed(10.0 + d, f"run-u{i}.scope"))))
     logged = [_job(1, start=1000, end=1600), _job(2, start=2000, end=2100, code=143), _job(3, start=3000, end=3800)]
     observed = {f"run-u{i}.scope": {"lock": "/x/heavy.lock"} for i in (1, 2, 3)}  # run-u4 ran under no lock it saw
-    est = server.estimator(runs.merge(h, _log(*logged)), observed)
+    est = server.estimator(runs.merge(h, _log(*logged)), observed, {})
     e = est.estimate("pixi run -e gpu --frozen sim", "gpu")
     assert (e.basis, e.n, e.median) == ("exact", 2, 700)
     lock = est.estimate("new.sh", "lock")
     assert (lock.basis, lock.n, lock.median) == ("default", 3, 2000)
+
+
+LOCK = "/srv/run/build.lock"
+HOLDER = "/bin/bash /srv/bin/with-lock 0 -- docker exec dev bin/build test //a:b"
+ROVER = {"project": "rover", "session": "rover-30", "worktree": ""}
+
+
+def _hold(first, seen, gone=None, since=None, unit="", at_start=False, command=HOLDER):
+    d = {"lock": LOCK, "command": command, "owner": ROVER, "unit": unit, "since": since if since is not None else first - 600,
+         "first": first, "seen": seen, "at_start": at_start}
+    return {**d, "gone": gone} if gone is not None else d
+
+
+def test_lockview_records_each_lock_holder_it_sees_and_when_it_first_sees_it_gone(tmp_path):
+    holds = server.Observed(tmp_path / "holds.json")
+    snap = procs.Snapshot({7: procs.Proc(7, 1, "bash", ("bash", "with-lock"), 4242)}, 0.0)
+    held = [locks.Lock(LOCK, holders=[locks.Party(7, 1000.0, "bash with-lock", owners.Owner("rover", "rover-30"), "/u.slice/run-u1.scope")])]
+    for now, lks in ((1500.0, held), (1503.0, held), (1506.0, []), (1509.0, [])):
+        server.note_holds(holds, lks, snap, now, first_sample=now == 1500.0)
+    assert holds.units == {f"{LOCK}:7:4242": {"lock": LOCK, "command": "bash with-lock", "owner": ROVER, "unit": "run-u1.scope",
+                                             "since": 1000.0, "first": 1500.0, "seen": 1503.0, "at_start": True, "gone": 1506.0}}
+
+
+def test_a_hold_lockview_saw_end_is_a_finished_run_in_its_locks_lane():
+    holds = {"a": _hold(1000.0, 1600.0, gone=1603.0), "b": _hold(2000.0, 5990.0),  # b still holds
+             "c": _hold(3000.0, 3000.0, gone=3003.0)}  # seen once: a queue's brief look at the lock, not a run
+    [row] = server.history_rows([], [], {}, holds, _gs(), NOW)
+    assert (row["lanes"], row["kind"], row["placed"], row["owner"], row["command"]) == (["lock:" + LOCK], "lock", True, ROVER, HOLDER)
+    # With no scope of its own, a hold starts when lockview first saw it: its holder's start includes its time in a queue.
+    assert (row["start"], row["end"], row["start_unseen"], row["end_unseen_until"]) == (1000.0, 1600.0, False, None)
+
+
+def test_a_hold_with_a_scope_starts_with_its_scope():
+    [row] = server.history_rows([], [], {}, {"a": _hold(1000.0, 1600.0, gone=1603.0, since=998.5, unit="run-u1.scope")}, _gs(), NOW)
+    assert (row["unit"], row["start"]) == ("run-u1.scope", 998.5)
+
+
+def test_a_hold_lockview_did_not_see_begin_or_end_says_so():
+    holds = {"a": _hold(1000.0, 1600.0, gone=4000.0, at_start=True)}  # held when lockview opened; gone by the time it reopened
+    [row] = server.history_rows([], [], {}, holds, _gs(), NOW)
+    assert (row["start"], row["end"], row["start_unseen"], row["end_unseen_until"]) == (1000.0, 1600.0, True, 4000.0)
+
+
+def test_a_hold_the_journal_saw_end_is_drawn_once_from_the_journal():
+    h = _journal(_started(1000.0, "run-u1.scope", "/usr/bin/make -j8"), _consumed(1600.0, "run-u1.scope"))
+    holds = {"a": _hold(1001.0, 1598.0, gone=1601.0, since=1000.0, unit="run-u1.scope")}
+    rows = server.history_rows(runs.merge(h, _log()), [], {"run-u1.scope": {"lock": LOCK}}, holds, _gs(), NOW)
+    assert [(r["unit"], r["end"], r["cpu_s"]) for r in rows] == [("run-u1.scope", 1600.0, 60.5)]
+
+
+def test_lock_holders_are_estimated_from_the_holds_lockview_saw_whole():
+    holds = {str(i): _hold(1000.0 * i, 1000.0 * i + d, gone=1000.0 * i + d + 3) for i, d in ((1, 600), (2, 800))}
+    holds["late"] = _hold(5000.0, 5100.0, gone=9000.0)  # ended while lockview was closed: at least 100 s, not a run time
+    holds["early"] = _hold(6000.0, 6100.0, gone=6103.0, at_start=True)  # began before lockview opened
+    e = server.estimator([], {}, holds).estimate(HOLDER, "lock")
+    assert (e.basis, e.n, e.median) == ("exact", 2, 700)
