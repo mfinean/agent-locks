@@ -189,7 +189,7 @@ def state(now: float) -> dict:
         "sample_ms": 84,
         "machine": {"ram_available_gb": 27, "ram_total_gb": 62.6, "gpu": {**gpu.__dict__, "proc_mb": None, "free_mb": gpu.free_mb},
                     "pressure": {"some_avg10": 0.4, "some_total_s": 812.0, "full_avg10": 0.1, "full_total_s": 140.0},
-                    "oomd": {"kills": True, "limit_pct": 50.0, "duration_s": 20.0}, "load": [11.2, 10.4, 9.8], "cpus": 16},
+                    "oomd": {"kills": True, "limit_pct": 50.0, "duration_s": 20.0}, "load": [11.2, 10.4, 9.8], "cpus": 16, "cpu_pct": 64.0},
         "sessions": [{"pid": 3100 + i, "name": name, "session_id": f"00000000-0000-4000-8000-00000000000{i}", "project": project,
                       "worktree": "", "status": "busy" if i < 4 else "waiting"} for i, (name, project) in enumerate(SESSIONS.items())],
         "gate": {**gs.as_dict(), "gates": server.gate_jobs(gs, est, now)},

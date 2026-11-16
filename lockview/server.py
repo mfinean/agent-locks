@@ -223,6 +223,7 @@ class Sampler:
         self.oomd = resources.oomd_policy(os.getuid())
         self.gpu_idle_since: dict[int, float] = {}  # gate pid -> since when its job has had no work on the GPU
         self.last_snap: procs.Snapshot | None = None  # the previous sample's, for each process's CPU use since
+        self.last_cpu: tuple[int, int] | None = None  # the previous sample's resources.cpu_times(), for CPU use since
 
     def _refresh_history(self, now: float) -> bool:
         if now - self._journal_at < self.journal_every:
@@ -262,7 +263,10 @@ class Sampler:
         session_cg = resources.session_cgroup(snap.procs[os.getpid()].cgroup) if os.getpid() in snap.procs else None
         psi = resources.pressure(session_cg / "memory.pressure") if session_cg else {}
         load = os.getloadavg()
-        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], resources.cpu_times()))
+        cpu = resources.cpu_times()
+        cpu_pct = resources.busy_pct(self.last_cpu, cpu)
+        self.last_cpu = cpu
+        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], cpu))
         return {
             "now": now,
             "sample_ms": round(1000 * (time.time() - t0)),
@@ -274,6 +278,7 @@ class Sampler:
                 "oomd": self.oomd.__dict__,
                 "load": load,
                 "cpus": os.cpu_count(),
+                "cpu_pct": cpu_pct,
             },
             "sessions": [s.__dict__ for s in sessions.values()],
             "gate": {**gs.as_dict(), "gates": jobs},

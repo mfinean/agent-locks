@@ -451,15 +451,12 @@ function renderTiles() {
   out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "Session memory pressure"), h("div", { class: "value" }, `${pv.toFixed(1)}%`),
     meter(pv / 100, pv >= lim ? "critical" : pv >= lim / 2 ? "warning" : "", [lim / 100]),
     h("div", { class: "sub" }, oomd.kills ? `systemd-oomd kills the whole session after ${oomd.duration_s} s above ${lim}%` : "systemd-oomd does not watch this session")));
-  const load = h("div", { class: "sub" }, `load ${m.load[0].toFixed(1)} on ${m.cpus} cores`);
+  out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "CPU busy"), h("div", { class: "value" }, m.cpu_pct == null ? "—" : `${Math.round(m.cpu_pct)}%`),
+    meter((m.cpu_pct || 0) / 100), h("div", { class: "sub" }, `load ${m.load[0].toFixed(1)} on ${m.cpus} cores`)));
   if ((cfg.programs || []).length) {  // config.toml's [gpu] programs: those that must run through the gate
     const progs = gs.programs || [], ungated = progs.filter((p) => !p.gated);
     out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "Gated programs"), h("div", { class: "value" }, `${progs.length} running`),
-      ungated.length ? h("div", { class: "status critical" }, `${ungated.length} outside the gate: no gpu job can start`) : h("div", { class: "status good" }, "all inside the gate"),
-      load));
-  } else {
-    out.push(h("div", { class: "tile" }, h("div", { class: "label" }, "CPU load"), h("div", { class: "value" }, m.load[0].toFixed(1)),
-      meter(Math.min(1, m.load[0] / m.cpus), m.load[0] > m.cpus ? "warning" : "", []), h("div", { class: "sub" }, `on ${m.cpus} cores`)));
+      ungated.length ? h("div", { class: "status critical" }, `${ungated.length} outside the gate: no gpu job can start`) : h("div", { class: "status good" }, "all inside the gate")));
   }
   $("#tiles").replaceChildren(...out);
 }
