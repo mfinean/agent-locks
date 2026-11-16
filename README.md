@@ -195,11 +195,12 @@ and why, and how much memory GPU jobs used together.
 </picture>
 
 Other machines your agents use over ssh. List their aliases under `[remote]`, and lockview runs a
-small probe there over the ssh connection, with nothing to install.
+small probe there over the ssh connection, with nothing to install. If lockview serves there too, the
+probe brings back its slots and locks over time.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/machines-dark.png">
-  <img src="docs/images/machines-light.png" alt="Another machine's RAM, GPUs, CPU and heavy jobs, with the session that started each">
+  <img src="docs/images/machines-light.png" alt="Another machine's RAM, GPUs, CPU, its slots and locks over time, and its heavy jobs, with the session that started each">
 </picture>
 
 It also shows other `flock` locks: any `.lock` file under your home that a process holds, and any

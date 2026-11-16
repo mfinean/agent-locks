@@ -286,6 +286,14 @@ root without any. In order, that is:
 3. for a container's own job, the container, or
 4. the project of the origin's directory.
 
+If lockview serves on the host too, such as `lockview --serve` as a user service, the probe also relays
+its timeline of slots and locks, every 20 seconds, and the host's card draws it as this machine's is
+drawn. It is that lockview's own: its runs, estimates and owners come from that host's gate log,
+journal and sessions. Each lockview server writes the port it listens on to
+`~/.local/state/lockview/serving/<pid>.json`, with its process's start time, so a reused pid isn't
+taken for a server that has exited. The probe reads the timeline from the first live server's
+`/api/timeline` on 127.0.0.1.
+
 ### Limits
 
 - **Lock waiters' order.** `flock` wakes waiters in no fixed order, so their predicted starts assume
@@ -306,4 +314,5 @@ root without any. In order, that is:
   to its client.
 - **Detached remote jobs.** lockview sees a job's ssh client only if the client is still running at
   one of its readings. It remembers clients for a day, which covers `setsid nohup … &`.
-- **Other machines' history** isn't kept: lockview shows what runs there now.
+- **Other machines' history** comes from a lockview serving there, and is up to 20 seconds old.
+  Without one, lockview shows what runs there now and keeps none of it.

@@ -198,7 +198,7 @@ def state(now: float) -> dict:
         "history": server.history_rows(finished, [], {}, {}, gs, now),
         "journal_error": "", "events_error": "", "machine_log_error": "",
         "capacity": {h: capacity.report(finished, log, gs, now, h) for h in server.CAPACITY_HOURS},
-        "remotes": {"config": "~/.config/agent-locks/config.toml", "hosts": [_remote(now)]},
+        "remotes": {"config": "~/.config/agent-locks/config.toml", "hosts": [_remote(cfg, now)]},
     }
 
 
@@ -222,7 +222,7 @@ def _container_build(now: float) -> dict:
             "via": owners.started_by("Claude session planner-3", links, "dev")}
 
 
-def _remote(now: float) -> dict:
+def _remote(cfg: policy.Config, now: float) -> dict:
     job = {"pid": 90412, "user": "dev", "command": "python train.py --config configs/fleet.yaml --gpus 2", "start": now - 5400,
            "cpu": 7.6, "rss": 21 * GB, "vram_mb": 38200, "procs": 14, "cwd": "/home/dev/perception", "session": None,
            "ssh": ["192.0.2.10", 51544], "top": [], "owner": _owner("perception-7"), "via": "ssh from here, pid 48977"}
@@ -231,7 +231,18 @@ def _remote(now: float) -> dict:
                "gpus": [{"index": i, "name": "NVIDIA RTX 6000 Ada Generation", "total_mb": 49140, "used_mb": used, "util_pct": util}
                         for i, (used, util) in enumerate([(19400, 96), (18800, 94)])],
                "gpu_error": "", "sessions": [], "jobs": [job]}
-    return {"alias": "gpu-box", "connected": True, "error": "", "age": 1.2, "reading": reading}
+    return {"alias": "gpu-box", "connected": True, "error": "", "age": 1.2, "reading": reading,
+            "timeline": _remote_timeline(cfg, now, job["start"]), "timeline_error": ""}
+
+
+def _remote_timeline(cfg: policy.Config, now: float, gpus_taken: float) -> dict:
+    """gpu-box's lockview timeline, as the probe relays it: a week of its gate's jobs, with no GPU job since the
+    training run over ssh, outside its gate, took both GPUs at gpus_taken."""
+    busy_until = {s: gpus_taken for s in SLOT_KINDS if s.startswith("gpu")}
+    finished = runs.merge(journal.History(), week(cfg, now, busy_until, random.Random(11)))
+    gs = gate.GateState(True, "", cfg, [], gate.slot_table(cfg, []), [], 71, resources.Gpu(True, "", 49140, 19400, 96))
+    return server.timeline({"now": now, "gate": {**gs.as_dict(), "gates": []}, "locks": [],
+                            "history": server.history_rows(finished, [], {}, {}, gs, now)})
 
 
 # Run after the page's first render: hide the tooltip and detail panel, and note where each card is.
