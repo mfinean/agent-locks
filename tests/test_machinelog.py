@@ -105,3 +105,9 @@ def test_cpu_times_leave_out_idle_and_iowait_and_count_guest_time_once(tmp_path)
     stat = tmp_path / "stat"
     stat.write_text("cpu  100 20 30 400 50 6 7 8 90 10\ncpu0 1 1 1 1 1 1 1 1 1 1\n")
     assert resources.cpu_times(stat) == (171, 621)
+
+
+def test_cpu_busy_is_the_share_of_cpu_time_between_two_readings_spent_busy():
+    assert resources.busy_pct((100, 1000), (160, 1100)) == 60.0
+    assert resources.busy_pct(None, (160, 1100)) is None  # the first reading has nothing to compare with
+    assert resources.busy_pct((160, 1100), (160, 1100)) is None

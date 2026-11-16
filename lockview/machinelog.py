@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .resources import Gpu
+from .resources import Gpu, busy_pct
 
 SCHEMA = 1
 
@@ -32,7 +32,6 @@ def summary(since: float, now: float, cpu0: tuple[int, int], readings: list[Read
     """One line for the readings taken after `since` up to `now`; `cpu0` is the CPU time at `since`."""
     gpus = [r.gpu for r in readings if r.gpu.ok]
     psi = [r.pressure for r in readings if r.pressure]
-    busy, total = (b - a for a, b in zip(cpu0, readings[-1].cpu, strict=True))
     return {
         "v": SCHEMA,
         "t": round(now),
@@ -43,7 +42,7 @@ def summary(since: float, now: float, cpu0: tuple[int, int], readings: list[Read
         "psi_full_max": max((p["full_avg10"] for p in psi), default=None),
         "gpu_util_mean": round(sum(g.util_pct for g in gpus) / len(gpus)) if gpus else None,
         "vram_max_mb": max((g.used_mb for g in gpus), default=None),
-        "cpu_pct": round(100 * busy / total, 1) if total > 0 else None,
+        "cpu_pct": busy_pct(cpu0, readings[-1].cpu),
         "load1": round(readings[-1].load1, 2),
     }
 

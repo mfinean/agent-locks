@@ -21,7 +21,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import capacity, config, estimate, events, gate, journal, locks, machinelog, owners, procs, remote, resources, runs
+from . import capacity, config, estimate, events, gate, journal, locks, machinelog, owners, probe, procs, remote, resources, runs
 
 WEB = Path(__file__).resolve().parent / "web"
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "lockview"
@@ -291,6 +291,8 @@ class Sampler:
         self.oomd = resources.oomd_policy(os.getuid())
         self.gpu_idle_since: dict[int, float] = {}  # gate pid -> since when its job has had no work on the GPU
         self.last_snap: procs.Snapshot | None = None  # the previous sample's, for each process's CPU use since
+        self.last_cpu: tuple[int, int] | None = None  # the previous sample's resources.cpu_times(), for CPU use since
+        self.docker = probe.Docker()
 
     def _refresh_history(self, now: float) -> bool:
         if now - self._journal_at < self.journal_every:
@@ -311,7 +313,7 @@ class Sampler:
         gs = gate.read(snap, sessions, now)
         lks = locks.read(snap, sessions)
         gate.flag_running(gs, lks, snap, self.gpu_idle_since, now)
-        outside = gate.outside(snap, self.last_snap, gs.gpu.proc_mb, sessions)
+        outside = gate.outside(snap, self.last_snap, gs.gpu.proc_mb, sessions, self.docker)
         self.last_snap = snap
         if refreshed and gs.installed:
             self.capacity = {h: capacity.report(self.finished, self.events, gs, now, h) for h in CAPACITY_HOURS}
@@ -333,7 +335,10 @@ class Sampler:
         session_cg = resources.session_cgroup(snap.procs[os.getpid()].cgroup) if os.getpid() in snap.procs else None
         psi = resources.pressure(session_cg / "memory.pressure") if session_cg else {}
         load = os.getloadavg()
-        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], resources.cpu_times()))
+        cpu = resources.cpu_times()
+        cpu_pct = resources.busy_pct(self.last_cpu, cpu)
+        self.last_cpu = cpu
+        self.machine_log.add(now, machinelog.Reading(resources.meminfo_gb("MemAvailable"), psi, gs.gpu, load[0], cpu))
         return {
             "now": now,
             "sample_ms": round(1000 * (time.time() - t0)),
@@ -345,10 +350,12 @@ class Sampler:
                 "oomd": self.oomd.__dict__,
                 "load": load,
                 "cpus": os.cpu_count(),
+                "cpu_pct": cpu_pct,
             },
             "sessions": [s.__dict__ for s in sessions.values()],
             "gate": {**gs.as_dict(), "gates": jobs},
             "outside": outside,
+            "docker_error": self.docker.error,
             "locks": lock_rows(lks, est, now),
             "history": history_rows(self.finished, self.history.lost(), self.observed.units, self.holds.units, gs, now),
             "journal_error": self.history.error,
