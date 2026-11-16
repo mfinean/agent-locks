@@ -149,7 +149,7 @@ details summary { cursor: pointer; color: var(--ink-2); }
     <div style="overflow-x:auto"><table id="queue"></table></div>
   </section>
   <section class="card">
-    <div class="card-head"><h2>Outside the gate</h2><span class="note">jobs Claude sessions run here without agent-gate · using a GPU, half a core or 2 GB</span></div>
+    <div class="card-head"><h2>Outside the gate</h2><span class="note">jobs Claude sessions run here without agent-gate, and jobs in containers · using a GPU, half a core or 2 GB</span></div>
     <div id="outside"></div>
   </section>
   <section class="card">
@@ -587,22 +587,28 @@ function jobsTable(jobs, t, keyOf, me) {
   return h("div", { style: "overflow-x:auto" }, h("table", {}, head, jobs.map((j) =>
     h("tr", { class: "row", onclick: () => openDetail(keyOf(j)) },
       h("td", {}, ownerCell(j.owner), me && j.user !== me ? h("div", { class: "muted" }, j.user) : null),
-      h("td", {}, h("div", { class: "job mono", title: j.command }, j.command), j.procs > 1 ? h("div", { class: "muted" }, `${j.procs} processes`) : null),
+      h("td", {}, h("div", { class: "job mono", title: j.command }, j.command),
+        j.container || j.procs > 1 ? h("div", { class: "muted" }, j.container ? h("span", { class: "tag", title: `runs in the container ${j.container}` }, j.container) : null,
+          j.container && j.procs > 1 ? " " : null, j.procs > 1 ? `${j.procs} processes` : null) : null),
       h("td", { class: "num" }, clock(j.start, now)),
       h("td", { class: "num" }, dur(t - j.start)),
       h("td", { class: "num" }, `${j.cpu.toFixed(1)} cores`),
       h("td", { class: "num" }, gb(j.rss)),
       h("td", { class: "num" }, j.vram_mb ? `${(j.vram_mb / 1024).toFixed(1)} GB` : h("span", { class: "muted" }, "—"))))));
 }
+// Without the Docker API, containers go by id and a docker exec isn't traced to its client.
+function dockerNote(error) {
+  return error ? h("div", { class: "muted", style: "margin-top:6px" }, `Docker API unreadable, so containers go by id and docker exec isn't traced to its client: ${error}`) : null;
+}
 function remoteJobs(hs) {
   const r = hs.reading;
-  if (!r.jobs.length) return h("div", { class: "muted" }, "Nothing heavy running.");
-  return jobsTable(r.jobs, r.t, (j) => `remote:${hs.alias}:${j.pid}`, r.home.split("/").pop());
+  if (!r.jobs.length) return h("div", {}, h("div", { class: "muted" }, "Nothing heavy running."), dockerNote(r.docker_error));
+  return h("div", {}, jobsTable(r.jobs, r.t, (j) => `remote:${hs.alias}:${j.pid}`, r.home.split("/").pop()), dockerNote(r.docker_error));
 }
 function renderOutside() {
   const jobs = S.outside || [];
   $("#outside").replaceChildren(jobs.length ? jobsTable(jobs, S.now, (j) => `outside:${j.pid}`, null)
-    : h("div", { class: "muted" }, "Nothing heavy outside the gate."));
+    : h("div", { class: "muted" }, "Nothing heavy outside the gate."), dockerNote(S.docker_error) || "");
 }
 function renderRemotes() {
   const R = S.remotes, box = $("#remotes");
@@ -782,6 +788,7 @@ function renderDetail() {
     if (r) row("Machine", `${it.hs.alias}${r.host !== it.hs.alias ? ` (${r.host})` : ""}`);
     row("Owner", ownerCell(j.owner));
     row("Started by", j.via || "unknown: no Claude session there runs it, and no ssh connection from here started it");
+    row("Container", j.container ? h("span", { class: "mono" }, j.container) : null);
     if (r) row("User", j.user);
     row("Started", `${clock(j.start, now)} (${dur(t - j.start)} ago)`);
     row("Using", `${j.cpu.toFixed(1)} cores · ${gb(j.rss)}${j.vram_mb ? ` · VRAM ${(j.vram_mb / 1024).toFixed(1)} GB` : ""} · ${j.procs} process${j.procs > 1 ? "es" : ""}`);
