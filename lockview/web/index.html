@@ -161,7 +161,7 @@ details summary { cursor: pointer; color: var(--ink-2); }
     <div id="locks"></div>
   </section>
   <section class="card">
-    <div class="card-head"><h2>Finished gate jobs</h2><span class="note" id="hist-note"></span></div>
+    <div class="card-head"><h2>Finished jobs</h2><span class="note" id="hist-note"></span></div>
     <div style="overflow-x:auto"><table id="history"></table></div>
   </section>
   <section class="card">
@@ -470,6 +470,7 @@ function endOf(r) {
   if (r.outcome === "oom-kill") return ["critical", "killed by the OOM killer"];
   if (r.outcome === "killed") return ["critical", "killed (SIGKILL on request)"];
   if (r.outcome === "lost") return ["warning", "lost when its session died"];
+  if (r.end_unseen_until) return ["warning", `ended by ${clock(r.end_unseen_until, S.now)}, while lockview was closed`];
   if (r.limit_stop) return ["warning", `stopped at the ${r.kind} limit`];
   if (r.code > 128) return ["critical", `ended by signal ${r.code - 128}`];
   if (r.code) return ["warning", `exit ${r.code}`];
@@ -648,13 +649,13 @@ function renderHistory() {
   const now = S.now, t0 = now - pastHours * 3600;
   const rows = (S.history || []).filter((r) => (r.end || r.start) >= t0).sort((a, b) => (b.end || b.start) - (a.end || a.start));
   const lost = rows.filter((r) => r.outcome === "lost").length;
-  $("#hist-note").textContent = `${rows.length - lost} in the past ${pastHours} h${lost ? ` · ${lost} lost when their session died` : ""} · from the gate's event log, and the user journal for lock runs and runs the log lacks`;
+  $("#hist-note").textContent = `${rows.length - lost} in the past ${pastHours} h${lost ? ` · ${lost} lost when their session died` : ""} · from the gate's event log, the user journal, and the lock holders lockview saw`;
   const head = h("tr", {}, ["Ended", "Ran", "Waited", "Lane", "Owner", "Job", "Peak", "Outcome"].map((c, i) => h("th", { class: i < 3 || i === 6 ? "num" : "" }, c)));
   const out = [head];
   for (const r of rows.slice(0, 150)) {
     out.push(h("tr", { class: "row", onclick: () => openDetail(`hist:${r.unit}:${r.start}`) },
       h("td", { class: "num" }, r.end ? clock(r.end, now) : "—"),
-      h("td", { class: "num" }, r.end ? dur(r.end - r.start) : "—"),
+      h("td", { class: "num" }, r.end ? (r.start_unseen || r.end_unseen_until ? "≥ " : "") + dur(r.end - r.start) : "—"),
       h("td", { class: "num", title: waitedText(r.waited) || null }, r.queued_at ? dur(r.start - r.queued_at) : h("span", { class: "muted" }, "—")),
       h("td", { class: "ink2", title: r.lane && !r.placed ? "not in the gate's log: its slot is the app's placement" : null }, r.lane ? (r.lane.startsWith("lock:") ? r.lane.split("/").pop() : r.lanes.join("+") + (r.placed ? "" : "?")) : "—"),
       h("td", {}, ownerCell(r.owner)),
@@ -662,7 +663,7 @@ function renderHistory() {
       h("td", { class: "num" }, r.peak != null ? h("span", {}, gb(r.peak), r.mem ? h("span", { class: "muted" }, ` / ${r.mem}`) : null) : h("span", { class: "muted" }, "—")),
       h("td", {}, outcomeCell(r))));
   }
-  if (rows.length === 0) out.push(h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No finished gate jobs in this window.")));
+  if (rows.length === 0) out.push(h("tr", {}, h("td", { colspan: 8, class: "muted" }, "No finished jobs in this window.")));
   $("#history").replaceChildren(...out);
 }
 
@@ -759,6 +760,8 @@ function renderDetail() {
   } else if (it.kind === "hist") {
     const r = it.r, end = endOf(r); title = r.label; command = r.command;
     row("Ran", r.end ? `${clock(r.start, now)} → ${clock(r.end, now)} (${dur(r.end - r.start)})` : `started ${clock(r.start, now)}, no end logged`);
+    if (r.start_unseen) row("Began", `before ${clock(r.start, now)}, when lockview opened and found it held`);
+    if (r.end_unseen_until) row("Ended", `between ${clock(r.end, now)} and ${clock(r.end_unseen_until, now)}, while lockview was closed`);
     if (r.queued_at) row("Waited", `${dur(r.start - r.queued_at)} from ${clock(r.queued_at, now)}${waitedText(r.waited) ? `: ${waitedText(r.waited)}` : ""}`);
     row("Owner", ownerCell(r.owner)); row("Kind", r.kind);
     row(r.lanes && r.lanes.length > 1 ? "Slots" : "Lane", r.lane ? r.lanes.join(" + ") + (r.placed ? "" : " (placed by the app: the gate's log lacks this run)") : "—");
@@ -766,7 +769,8 @@ function renderDetail() {
     if (r.peak != null) row("Peak memory", `${gb(r.peak)}${r.mem ? ` of its ${r.mem} cap` : ""}`);
     row("CPU time", r.cpu_s != null ? dur(r.cpu_s) : null);
     row("Directory", r.cwd ? h("span", { class: "mono" }, home(r.cwd)) : null);
-    row("Source", r.logged ? "the gate's event log, and the journal" : "the user journal"); row("Unit", h("span", { class: "mono" }, r.unit));
+    row("Source", r.source === "holds" ? "lockview, which saw it hold the lock" : r.logged ? "the gate's event log, and the journal" : "the user journal");
+    row("Unit", r.unit ? h("span", { class: "mono" }, r.unit) : null);
   } else if (it.kind === "lock") {
     const p = it.p, held = it.lk.holders.includes(p); title = p.label; command = p.command;
     row("Lock", h("span", { class: "mono" }, it.lk.label)); row("State", held ? "holds the lock" : "waiting for it");

@@ -131,7 +131,7 @@ default browser.
 | `/proc/locks`, open file descriptors and their `fdinfo` | holders and waiters of other exclusive `flock` locks: a holder is a process whose open file holds the lock, not every one with the file open |
 | each process's `/proc/<pid>/stat` | its CPU time, memory and session, for heavy jobs outside the gate |
 | the gate's event log | each finished job's kind, slots, waits by reason, exit code and peak memory, two weeks back |
-| `journalctl --user` | every finished `systemd-run` scope: start, end, CPU time and OOM kills |
+| `journalctl --user` | every `systemd-run` scope's start; the end, CPU time and OOM kills of those that used a second or so of CPU |
 | `~/.claude/sessions/*.json` | which Claude Code session started a process |
 | `/proc/net/tcp` and `tcp6` | which local ssh client started a job on another machine |
 
@@ -150,6 +150,26 @@ A job's owner is its session, its project and its worktree.
 
 The gate records the owner when the job queues. For a run it didn't log, lockview uses what it saw
 while the job ran (kept in `~/.local/state/lockview/observed.json`), or else the job's directory.
+
+### Runs under a lock
+
+systemd logs a scope's end, with its CPU time, only once the scope has used a second or so of CPU, so
+the journal lacks the end of most runs under a lock: a `flock … systemd-run docker exec …` scope holds
+only the docker client. lockview keeps its own record of each holder it sees, in
+`~/.local/state/lockview/holds.json`: by lock, pid and the pid's start, the first and last samples that
+saw it hold the lock, and the first that saw it gone. A run under a lock is the journal's when the
+journal logged its end, and this record's otherwise:
+
+- It starts with its scope, if it has one, or else at the first sample that saw it: a holder's own
+  start includes its time in a queue.
+- It ends at the last sample that saw it hold the lock, within a sample of its real end.
+- A hold seen in one sample only is left out. A queue that takes the lock for a moment to look, and
+  gives it back, is not a run.
+- lockview sees nothing while it is closed. A hold it found held as it opened, with no scope to date
+  it, began before then; one it last saw well before it saw it gone ended while it was closed. Both
+  show their run time with "≥", and are left out of estimates.
+
+Lock holders' estimates come from these records, by the holder's own command.
 
 ### Jobs outside the gate
 
