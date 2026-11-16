@@ -52,12 +52,112 @@ def test_only_heavy_jobs_are_sent_with_their_use_summed_and_their_heaviest_proce
     assert jobs[12]["ssh"] is None and jobs[12]["cwd"] == ""  # nothing to read under /nonexistent
 
 
+TICK = probe.CLK_TCK
+
+
+def _cpu(ppid, comm="make", ticks=0, reaped=0, start=5, zombie=False):
+    """A process in a CPU reading: its own ticks, and those of the children it has reaped."""
+    return {"ppid": ppid, "sid": 0, "comm": comm, "argv": [] if zombie else [comm], "uid": 1000, "ticks": ticks * TICK,
+            "reaped": reaped * TICK, "start": start, "rss": 0, "zombie": zombie}
+
+
 def test_a_processs_cores_are_its_cpu_ticks_over_the_seconds_between_readings():
-    tick = probe.CLK_TCK
-    before = {1: {"ticks": 0, "start": 5}, 2: {"ticks": 0, "start": 5}}
-    now = {1: {"ticks": 3 * tick, "start": 5}, 2: {"ticks": tick, "start": 9}, 3: {"ticks": tick, "start": 9}}
-    assert probe.cores_used(before, now, 2.0) == {1: 1.5}  # 2 is another process under a reused pid, 3 is new
+    before = {1: _cpu(0, "systemd"), 10: _cpu(1), 11: _cpu(1)}
+    now = {1: _cpu(0, "systemd"), 10: _cpu(1, ticks=3), 11: _cpu(1, ticks=1, start=9), 12: _cpu(1, ticks=1, start=9)}
+    # 11 is another process under a reused pid and 12 is new: each started since, so all its time is since.
+    assert probe.cores_used(before, now, 2.0) == {1: 0.0, 10: 1.5, 11: 0.5, 12: 0.5}
     assert probe.cores_used(before, now, 0.0) == {}
+
+
+def test_a_process_is_charged_the_children_it_reaped_between_readings():
+    # make ran a compile that started and ended between the readings: only make's reaped time shows it.
+    before = {1: _cpu(0, "systemd"), 10: _cpu(1)}
+    now = {1: _cpu(0, "systemd"), 10: _cpu(1, ticks=1, reaped=4)}
+    assert probe.cores_used(before, now, 2.0)[10] == 2.5
+
+
+def test_a_child_seen_before_it_exited_is_charged_only_for_its_time_since():
+    before = {1: _cpu(0, "systemd"), 10: _cpu(1), 11: _cpu(10, "cc1plus", ticks=6), 12: _cpu(11, "as", ticks=1)}
+    now = {1: _cpu(0, "systemd"), 10: _cpu(1, reaped=9)}  # the compile used 2 ticks more, and its assembler none
+    assert probe.cores_used(before, now, 2.0)[10] == 1.0
+
+
+def test_a_boundarys_reaped_children_were_jobs_of_their_own():
+    before = {1: _cpu(0, "systemd"), 30: _cpu(1, "claude"), 31: _cpu(30, "bash", ticks=8)}
+    now = {1: _cpu(0, "systemd", reaped=50), 30: _cpu(1, "claude", ticks=1, reaped=10)}
+    assert probe.cores_used(before, now, 2.0) == {1: 0.0, 30: 0.5}
+
+
+def test_a_process_that_reaped_a_boundary_is_charged_its_own_time_alone():
+    # agent-gate (20), marked a boundary as what it runs is a gate job, ends with its gate job (21): the shell
+    # that ran it reaps it, with 21's time.
+    before = {1: _cpu(0, "systemd"), 10: _cpu(1, "bash"), 20: {**_cpu(10, "python3"), "boundary": True}, 21: _cpu(20, ticks=7200)}
+    now = {1: _cpu(0, "systemd"), 10: _cpu(1, "bash", ticks=1, reaped=7206)}
+    assert probe.cores_used(before, now, 2.0)[10] == 0.5
+    assert probe.job_root(21, before) == 21 and probe.job_root(20, before) == 20
+
+
+def test_a_zombie_is_charged_once_across_the_readings_before_and_after_it_is_reaped():
+    first = {1: _cpu(0, "systemd"), 10: _cpu(1), 11: _cpu(10, "cc1plus", ticks=6)}
+    second = {1: _cpu(0, "systemd"), 10: _cpu(1), 11: _cpu(10, "cc1plus", ticks=8, zombie=True)}
+    third = {1: _cpu(0, "systemd"), 10: _cpu(1, reaped=8)}
+    assert probe.cores_used(first, second, 2.0)[11] == 1.0
+    assert probe.cores_used(second, third, 2.0)[10] == 0.0
+
+
+def test_children_reaped_without_a_count_take_nothing_from_their_parent():
+    # A parent that ignores SIGCHLD has its children reaped for it, and their time is not added to its own.
+    before = {1: _cpu(0, "systemd"), 10: _cpu(1), 11: _cpu(10, "worker", ticks=6)}
+    now = {1: _cpu(0, "systemd"), 10: _cpu(1, ticks=2)}
+    assert probe.cores_used(before, now, 2.0)[10] == 1.0
+
+
+def _burn_cpu(seconds):
+    return [sys.executable, "-c", f"import time\nend = time.process_time() + {seconds}\nwhile time.process_time() < end: pass"]
+
+
+def test_the_probe_reads_the_time_of_reaped_children_and_keeps_zombies():
+    import subprocess
+
+    me = os.getpid()
+    reaped = probe.read_procs()[me]["reaped"]
+    subprocess.run(_burn_cpu(0.2), check=True)
+    assert probe.read_procs()[me]["reaped"] - reaped >= 0.1 * TICK
+    child = subprocess.Popen(["true"])
+    try:
+        deadline = time.time() + 10
+        while Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
+            assert time.time() < deadline
+            time.sleep(0.01)
+        z = probe.read_procs()[child.pid]
+        assert (z["zombie"], z["argv"], z["ppid"]) == (True, [], me)
+        assert procs.Snapshot.take().procs[child.pid].zombie
+    finally:
+        child.wait()
+    assert not probe.read_procs()[me]["zombie"] and procs.Snapshot.take().procs[me].reaped >= reaped
+
+
+def _stat(pid, comm, state, flags):
+    """A /proc/<pid>/stat line: flags is field 9, utime and stime 14 and 15, starttime 22 and rss 24."""
+    fields = [state, 1, pid, pid, 0, -1, flags, 0, 0, 0, 0, 5, 3, 0, 0, 20, 0, 1, 0, 777, 0, 10]
+    return f"{pid} ({comm}) " + " ".join(map(str, fields)) + "\n"
+
+
+def test_the_probe_leaves_out_kernel_threads_and_keeps_a_process_as_it_exits(tmp_path):
+    # Neither has a command line: a kernel thread never has one, and a process gives its up as it exits,
+    # before it is a zombie. The exiting process's time is still to be reaped, so it stays.
+    for pid, comm, flags in ((2, "kthreadd", 0x00208040), (40, "cc1plus", 0x00400144)):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(_stat(pid, comm, "R", flags))
+        (tmp_path / str(pid) / "cmdline").write_bytes(b"")
+    found = probe.read_procs(str(tmp_path))
+    assert list(found) == [40] and (found[40]["argv"], found[40]["zombie"], found[40]["ticks"]) == ([], False, 8)
+
+
+def test_a_job_whose_process_has_given_up_its_command_line_goes_by_its_name():
+    table = {1: _cpu(0, "systemd"), 30: _cpu(1, "python3", zombie=True)}
+    [j] = probe.jobs(table, {30: 1.0}, {}, {}, str, root="/nonexistent")
+    assert (j["command"], j["top"][0]["command"]) == ("[python3]", "[python3]")
 
 
 def test_the_probe_reads_this_process_and_an_ssh_login_from_the_environment(tmp_path):

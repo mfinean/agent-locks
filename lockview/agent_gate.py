@@ -48,6 +48,12 @@ QUEUE = RUN_DIR / "queue"
 LOG_DIR = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "agent-gate"
 CGROUPS = Path("/sys/fs/cgroup")
 IN_SCOPE = re.compile(r"/agent-gate-\d+\.scope(/|$)")  # a cgroup in a gate job's scope
+GATE_MAIN = "from lockview.agent_gate import main"  # in the program bin/agent-gate has python3 run
+
+
+def runs_gate(argv) -> bool:
+    """Whether a command line is the gate's own: bin/agent-gate runs `python3 -I -c <program> …`."""
+    return len(argv) > 3 and argv[2] == "-c" and GATE_MAIN in argv[3]
 POLL_S = float(os.environ.get("AGENT_GATE_POLL_S") or 15)
 SAY_EVERY_S = 300  # how often a waiting gate says it still waits
 STOP_GRACE_S = 30  # between a limit's SIGTERM and its SIGKILL

@@ -156,8 +156,17 @@ while the job ran (kept in `~/.local/state/lockview/observed.json`), or else the
 lockview applies the probe's test (see [Other machines](#other-machines)) to this machine too. A job
 is a process tree that something started: the topmost process below an init, sshd, tmux, screen, a
 Claude session or an interactive shell, with its descendants. It is heavy if it uses a GPU, half a
-core or 2 GB, with its CPU use measured between two samples. Processes in a gate job's scope are left
-out, and so is any job no Claude session started, such as the desktop's own apps.
+core or 2 GB, with its CPU use measured between two samples. agent-gate is a boundary too, as what it
+runs is a gate job. Gate jobs are left out, and so is any job no Claude session started, such as the
+desktop's own apps.
+
+A job's CPU use counts processes that start and end between two samples, such as a make's compiles:
+each process is also charged the CPU time of the children it reaped since the last sample, less what
+those children had used by then, which that sample counted. Sessions, shells and the other processes
+that start jobs are charged their own time alone, since the children they reap were jobs of their own,
+and so is a process in the interval it reaps one of them: the shell that ran agent-gate, as agent-gate
+ends with its gate job. A process that is exiting is still read, so its time is counted once, however
+the samples fall.
 
 ### Estimates and predicted starts
 
@@ -230,6 +239,8 @@ using a GPU, half a core or 2 GB. A job's owner is, in order:
   guessed kind. The timeline puts it in a free slot, marked `?`, which shows how busy the slots were
   but not which slot it had.
 - **Very short scopes** can end without the journal's CPU-time line, and are left out.
+- **Gate runs shorter than a sample.** An agent-gate that starts and ends between two samples is
+  never seen, so for that sample its gate job's CPU counts toward the job that ran agent-gate.
 - **Detached jobs here.** A job started with `setsid nohup … &` leaves its session's process tree,
   so it isn't listed outside the gate.
 - **Detached remote jobs.** lockview sees a job's ssh client only if the client is still running at

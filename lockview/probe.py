@@ -25,11 +25,14 @@ BOUNDARIES = {"init", "systemd", "tmux: server", "screen", "SCREEN", "claude", "
 SHELLS = {"bash", "sh", "dash", "zsh", "fish"}
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
+PF_KTHREAD = 0x00200000  # a kernel thread, in /proc/<pid>/stat's flags
 
 
 def read_procs(root="/proc"):
-    """pid -> its parent, session, comm, argv, owner's uid, CPU ticks so far, start (ticks after boot) and RSS
-    (bytes). Kernel threads, which have no argv, are left out."""
+    """pid -> its parent, session, comm, argv, owner's uid, CPU ticks so far (its own, and those of the
+    children it has reaped), start (ticks after boot), RSS (bytes) and whether it is a zombie. Kernel threads
+    are left out. A process that is exiting or a zombie has no argv, but stays: its time is not yet its
+    parent's."""
     out = {}
     for name in os.listdir(root):
         if not name.isdigit():
@@ -43,20 +46,23 @@ def read_procs(root="/proc"):
             uid = os.stat(d).st_uid
         except OSError:
             continue  # it exited
-        if not raw:
+        rest = stat[stat.rindex(")") + 2:].split()  # rest[0] is field 3 (state), so field n is rest[n - 3]
+        if int(rest[6]) & PF_KTHREAD:
             continue
-        rest = stat[stat.rindex(")") + 2:].split()  # rest[0] is field 3 (state)
+        zombie = rest[0] == "Z"
+        # Fields 14 and 15 are its own user and system time, 16 and 17 its reaped children's.
         out[int(name)] = {
             "ppid": int(rest[1]), "sid": int(rest[3]), "comm": stat[stat.index("(") + 1:stat.rindex(")")],
-            "argv": [a.decode(errors="replace") for a in raw.rstrip(b"\0").split(b"\0")], "uid": uid,
-            "ticks": int(rest[11]) + int(rest[12]), "start": int(rest[19]), "rss": int(rest[21]) * PAGE,
+            "argv": [a.decode(errors="replace") for a in raw.rstrip(b"\0").split(b"\0")] if raw else [], "uid": uid,
+            "ticks": int(rest[11]) + int(rest[12]), "reaped": int(rest[13]) + int(rest[14]), "start": int(rest[19]),
+            "rss": int(rest[21]) * PAGE, "zombie": zombie,
         }
     return out
 
 
 def is_boundary(pid, p):
     """A process that starts jobs rather than being part of one."""
-    if pid <= 1 or p["comm"] in BOUNDARIES or p["comm"].startswith("sshd"):
+    if pid <= 1 or p["comm"] in BOUNDARIES or p["comm"].startswith("sshd") or p.get("boundary"):
         return True
     # An interactive shell: a session's leader, as in a tmux pane or an ssh login, that runs no -c script.
     return p["comm"] in SHELLS and p["sid"] == pid and "-c" not in p["argv"][1:]
@@ -121,13 +127,42 @@ def ssh_connection(pid, root="/proc"):
 
 
 def cores_used(before, procs, seconds):
-    """pid -> cores each process used since `before`, a reading `seconds` older. A pid in both readings with
-    another start time is another process."""
+    """pid -> cores each process used since `before`, a reading `seconds` older. A process that started since
+    used all its time since; a pid in both readings with another start time is another process.
+
+    A process's own time misses children that start and end between readings, such as a make's compiles,
+    so it is also charged the time of the children it reaped since, less what they had used by `before`,
+    which was counted then. A boundary is charged its own time alone: the children it reaps were jobs of
+    their own. So is a process that reaped a boundary since, with the jobs that boundary reaped: what it
+    reaped can't be told apart from its own children's time. Reaped time never counts below nothing, as
+    children reaped for a parent that ignores SIGCHLD add nothing to its count."""
     span = seconds * CLK_TCK
     if span <= 0:
         return {}
-    return {pid: max(0, p["ticks"] - before[pid]["ticks"]) / span for pid, p in procs.items()
-            if pid in before and before[pid]["start"] == p["start"]}
+    alive = {pid for pid, p in procs.items() if pid in before and before[pid]["start"] == p["start"]}
+    counted = {}  # a live process -> what its children that have since ended had used by `before`
+    whole = set()  # live processes that reaped a boundary since
+    for pid, p in before.items():
+        if pid in alive:
+            continue
+        reaper, boundary = p["ppid"], is_boundary(pid, p)
+        for _ in range(len(before)):  # a parent that ended too took the child's time with it to its own parent
+            if reaper in alive or reaper not in before:
+                break
+            boundary = boundary or is_boundary(reaper, before[reaper])
+            reaper = before[reaper]["ppid"]
+        if reaper in alive:
+            counted[reaper] = counted.get(reaper, 0) + p["ticks"] + p["reaped"]
+            if boundary:
+                whole.add(reaper)
+    out = {}
+    for pid, p in procs.items():
+        was = before[pid] if pid in alive else {"ticks": 0, "reaped": 0}
+        ticks = p["ticks"] - was["ticks"]
+        if not is_boundary(pid, p) and pid not in whole:
+            ticks += max(0, p["reaped"] - was["reaped"] - counted.get(pid, 0))
+        out[pid] = max(0, ticks) / span
+    return out
 
 
 def jobs(procs, cpu, vram, sessions, user_of, root="/proc"):
@@ -144,16 +179,17 @@ def jobs(procs, cpu, vram, sessions, user_of, root="/proc"):
         if cores < MIN_CPU and rss < MIN_RSS and not vram_mb:
             continue
         heaviest = sorted(members, key=lambda pid: (use[pid][2] > 0, use[pid][0], use[pid][1]), reverse=True)[:TOP]
+        command = {pid: " ".join(procs[pid]["argv"])[:MAX_COMMAND] or f"[{procs[pid]['comm']}]" for pid in (top, *heaviest)}
         p = procs[top]
         try:
             cwd = os.readlink(f"{root}/{top}/cwd")
         except OSError:
             cwd = ""
         out.append({
-            "pid": top, "user": user_of(p["uid"]), "command": " ".join(p["argv"])[:MAX_COMMAND], "start": p["start"],
+            "pid": top, "user": user_of(p["uid"]), "command": command[top], "start": p["start"],
             "cpu": round(cores, 2), "rss": rss, "vram_mb": vram_mb, "procs": len(members), "cwd": cwd,
             "session": session_of(top, procs, sessions), "ssh": ssh_connection(top, root),
-            "top": [{"pid": pid, "command": " ".join(procs[pid]["argv"])[:MAX_COMMAND], "cpu": round(use[pid][0], 2),
+            "top": [{"pid": pid, "command": command[pid], "cpu": round(use[pid][0], 2),
                      "rss": use[pid][1], "vram_mb": use[pid][2]} for pid in heaviest],
         })
     return sorted(out, key=lambda j: j["start"])

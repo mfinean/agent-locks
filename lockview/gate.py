@@ -143,11 +143,16 @@ def find_programs(snap: Snapshot, sessions: dict[int, owners.Session], patterns:
     return out
 
 
+def _gated(snap: Snapshot, pid: int) -> bool:
+    return bool(agent_gate.IN_SCOPE.search(snap.procs[pid].cgroup))
+
+
 def _probe_view(snap: Snapshot) -> dict[int, dict]:
-    """The snapshot's processes outside every gate job's scope, in probe.py's form. Kernel threads have no argv."""
+    """The snapshot's processes in probe.py's form. agent-gate is a boundary: what it runs is a gate job."""
     return {p.pid: {"ppid": p.ppid, "sid": p.sid, "comm": p.comm, "argv": list(p.argv), "uid": None, "ticks": p.ticks,
-                    "start": p.start_ticks, "rss": p.rss}
-            for p in snap.procs.values() if p.argv and not agent_gate.IN_SCOPE.search(p.cgroup)}
+                    "reaped": p.reaped, "start": p.start_ticks, "rss": p.rss, "zombie": p.zombie,
+                    "boundary": agent_gate.runs_gate(p.argv)}
+            for p in snap.procs.values()}
 
 
 def outside(snap: Snapshot, before: Snapshot | None, vram_mb: dict[int, int], sessions: dict[int, owners.Session]) -> list[dict]:
@@ -162,8 +167,8 @@ def outside(snap: Snapshot, before: Snapshot | None, vram_mb: dict[int, int], se
     cpu = probe.cores_used(_probe_view(before), view, snap.taken - before.taken) if before else {}
     out = []
     for j in probe.jobs(view, cpu, vram_mb, {}, lambda _uid: ""):
-        if probe.is_boundary(j["pid"], view[j["pid"]]):
-            continue  # a session, a shell or a terminal itself, rather than a job one started
+        if probe.is_boundary(j["pid"], view[j["pid"]]) or _gated(snap, j["pid"]):
+            continue  # a session, a shell or a terminal itself, rather than a job one started; or a gate job
         owner = owners.owner_of(j["pid"], snap, sessions)
         if owner.session:
             out.append({**j, "start": snap.btime + j["start"] / procs.CLK_TCK, "owner": owner.as_dict(),
