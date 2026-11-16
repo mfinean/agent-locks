@@ -13,6 +13,8 @@ session runs. Only jobs that use a GPU, half a core or 2 GB are sent.
 Some jobs are driven from another job, and belong to whoever started that one: a process `docker exec`
 started in a container is driven by that docker client, and a Bazel server by the Bazel client whose
 command it runs.
+
+If lockview serves there too, the probe relays its timeline (its /api/timeline) every TIMELINE_EVERY seconds.
 """
 
 import http.client
@@ -36,6 +38,7 @@ CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE = os.sysconf("SC_PAGE_SIZE")
 PF_KTHREAD = 0x00200000  # a kernel thread, in /proc/<pid>/stat's flags
 DOCKER = "/var/run/docker.sock"
+TIMELINE_EVERY = 20.0  # seconds between relays of lockview's timeline: it reads its history as often
 EXEC_VALUES = {"-e", "--env", "--env-file", "-u", "--user", "-w", "--workdir", "--detach-keys"}  # docker exec's options with a value
 
 
@@ -323,6 +326,46 @@ def load_sessions(procs, directory):
     return out
 
 
+def lockview_timeline(procs, directory):
+    """(the timeline of a lockview serving here, why there is none): (None, "") if no lockview serves here.
+    directory: where lockview's servers say on which port they listen (server.announce())."""
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None, ""
+    error = ""
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name)) as f:
+                d = json.load(f)
+            pid, port = int(d["pid"]), int(d["port"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if pid not in procs or procs[pid]["start"] != d.get("start"):
+            continue  # that server has exited
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            c.request("GET", "/api/timeline")
+            r = c.getresponse()
+            body = r.read()
+            if r.status != 200:
+                raise OSError(f"HTTP {r.status}")
+            timeline = json.loads(body)
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            error = f"lockview there didn't answer on port {port}: {e}"
+            continue
+        finally:
+            c.close()
+        if "error" in timeline:
+            lines = [x for x in str(timeline["error"]).splitlines() if x.strip()]
+            error = "lockview there failed: " + (lines[-1].strip() if lines else "")
+            continue
+        return timeline, ""
+    return None, error
+
+
 def ssh_connection(pid, root="/proc"):
     """The [client ip, client port] an ssh login gave pid's environment, if pid is ours to read."""
     try:
@@ -486,8 +529,10 @@ def users():
 def main(interval):
     btime, user_of = boot_time(), users()
     sessions_dir = os.path.expanduser("~/.claude/sessions")
+    serving = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "lockview", "serving")
     docker = Docker()
     before, cpu0, t0 = read_procs(), cpu_times(), time.time()
+    relayed = 0.0  # when lockview's timeline was last relayed
     while True:
         time.sleep(interval)
         procs, cpu1, t1 = read_procs(), cpu_times(), time.time()
@@ -502,12 +547,16 @@ def main(interval):
             j["start"] = btime + j["start"] / CLK_TCK
             j["origin"]["start"] = btime + j["origin"]["start"] / CLK_TCK
         busy, total = cpu1[0] - cpu0[0], cpu1[1] - cpu0[1]
-        print(json.dumps({
+        reading = {
             "v": 1, "t": t1, "host": os.uname()[1], "home": os.path.expanduser("~"), "cpus": os.cpu_count(),
             "load": list(os.getloadavg()), "cpu_pct": round(100 * busy / total, 1) if total > 0 else None,
             "ram_total": mem["MemTotal"], "ram_available": mem["MemAvailable"], "pressure": pressure(),
             "gpus": cards, "gpu_error": gpu_error, "docker_error": docker.error, "sessions": sorted(s["name"] for s in sessions.values()), "jobs": found,
-        }, separators=(",", ":")), flush=True)
+        }
+        if t1 - relayed >= TIMELINE_EVERY:
+            relayed = t1
+            reading["timeline"], reading["timeline_error"] = lockview_timeline(procs, serving)
+        print(json.dumps(reading, separators=(",", ":")), flush=True)
         before, cpu0, t0 = procs, cpu1, t1
 
 

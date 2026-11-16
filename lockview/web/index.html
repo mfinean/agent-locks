@@ -117,7 +117,9 @@ aside#detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: v
 .remote-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .remote-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .remote .tiles { margin-bottom: 10px; }
-.remote.stale-host .tiles, .remote.stale-host table { opacity: .55; }
+.remote-timeline { margin-bottom: 10px; }
+.remote-timeline-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.remote.stale-host .tiles, .remote.stale-host .timeline, .remote.stale-host table { opacity: .55; }
 details summary { cursor: pointer; color: var(--ink-2); }
 @media (max-width: 720px) { header.bar, main { padding-left: 16px; padding-right: 16px; } .hide-sm { display: none; } }
 </style>
@@ -271,10 +273,11 @@ function updateStatus() {
 }
 
 // ---------- items: one list of everything drawable, keyed for tooltips and the detail panel ----------
-function items() {
+// st: the state to draw, this machine's or another's timeline (its /api/timeline).
+function items(st) {
   const out = [];
-  const now = S.now;
-  const gates = (S.gate && S.gate.gates) || [];
+  const now = st.now;
+  const gates = (st.gate && st.gate.gates) || [];
   for (const g of gates) {
     const base = { key: `gate:${g.pid}`, kind: "gate", g, owner: g.owner, label: g.label, command: g.command.join(" ") };
     if (g.state === "running") {
@@ -283,11 +286,11 @@ function items() {
       for (const slot of g.predicted.slots) out.push({ ...base, lane: slot, start: g.predicted.start, end: g.predicted.end, phase: "predicted" });
     }
   }
-  for (const r of S.history || []) {
+  for (const r of st.history || []) {
     if (!r.lane || r.end == null) continue;
     for (const lane of r.lanes || [r.lane]) out.push({ key: `hist:${r.unit}:${r.start}`, kind: "hist", r, owner: r.owner, label: r.label, command: r.command, lane, start: r.start, end: r.end, phase: "done" });
   }
-  for (const lk of S.locks || []) {
+  for (const lk of st.locks || []) {
     const lane = "lock:" + lk.label;
     for (const p of lk.holders) out.push({ key: `lock:${lk.path}:${p.pid}`, kind: "lock", lk, p, owner: p.owner, label: p.label, command: p.command, lane, start: p.since, end: now, est: p.predicted_end, phase: "running" });
     for (const p of lk.waiters) if (p.predicted) out.push({ key: `lock:${lk.path}:${p.pid}`, kind: "lock", lk, p, owner: p.owner, label: p.label, command: p.command, lane, start: p.predicted.start, end: p.predicted.end, phase: "predicted" });
@@ -297,25 +300,25 @@ function items() {
 // A slot its lock's own kind can't take (gpu.3, cpu.4), only its short kind: as gate.short_only() has it.
 const isShortOnly = (sl) => !sl.kinds.includes(sl.lock);
 
-function lanes() {
+function lanes(st) {
   const L = [];
-  for (const sl of (S.gate && S.gate.slots) || []) {
+  for (const sl of (st.gate && st.gate.slots) || []) {
     const short = isShortOnly(sl);
     L.push({ id: sl.name, label: `${sl.lock.toUpperCase()} ${sl.name.split(".")[1]}${short ? " short" : ""}`,
              title: short ? `${sl.name}: ${sl.lock}-short jobs only` : null, group: sl.lock });
   }
-  for (const lk of S.locks || []) L.push({ id: "lock:" + lk.label, label: lk.label.split("/").pop(), title: lk.label, group: "lock" });
+  for (const lk of st.locks || []) L.push({ id: "lock:" + lk.label, label: lk.label.split("/").pop(), title: lk.label, group: "lock" });
   const seen = new Set(L.map((l) => l.id));
-  for (const r of S.history || []) if (r.lane && r.lane.startsWith("lock:") && !seen.has(r.lane)) { seen.add(r.lane); L.push({ id: r.lane, label: r.lane.split("/").pop(), title: r.lane.slice(5), group: "lock" }); }
+  for (const r of st.history || []) if (r.lane && r.lane.startsWith("lock:") && !seen.has(r.lane)) { seen.add(r.lane); L.push({ id: r.lane, label: r.lane.split("/").pop(), title: r.lane.slice(5), group: "lock" }); }
   return L;
 }
 
 // ---------- timeline ----------
 let measureCtx = null;
 function textWidth(t) { measureCtx = measureCtx || document.createElement("canvas").getContext("2d"); measureCtx.font = "11px system-ui, sans-serif"; return measureCtx.measureText(t).width; }
-function renderTimeline() {
-  const box = $("#timeline");
-  const now = S.now, all = items(), L = lanes();
+// prefix: what the items' keys get in front, to tell another machine's from this one's; name: that machine's.
+function renderTimeline(box, legend, st, prefix, name) {
+  const now = st.now, all = items(st), L = lanes(st);
   const t0 = now - pastHours * 3600;
   const ends = all.filter((i) => i.phase === "predicted" || i.est).map((i) => Math.max(i.end, i.est || 0));
   const t1 = Math.min(now + 12 * 3600, Math.max(now + 3600, ...ends) + 600);
@@ -324,7 +327,7 @@ function renderTimeline() {
   const y = {}; let yy = top, prev = null;
   for (const l of L) { if (prev && prev !== l.group) yy += gap; y[l.id] = yy; yy += row; prev = l.group; }
   const H = yy + 8;
-  const svg = s("svg", { width: W, height: H, role: "img", "aria-label": "Timeline of slots and locks" });
+  const svg = s("svg", { width: W, height: H, role: "img", "aria-label": `Timeline of slots and locks${name ? ` on ${name}` : ""}` });
   // hour ticks
   const span = (t1 - t0) / 3600, step = span <= 5 ? 1800 : span <= 14 ? 3600 : span <= 30 ? 7200 : 14400;
   for (let t = Math.ceil(t0 / step) * step; t <= t1; t += step) {
@@ -342,7 +345,7 @@ function renderTimeline() {
   for (const it of all) {
     if (!(it.lane in y) || it.end < t0 || it.start > t1) continue;
     const c = colorOf(it.owner && it.owner.project), by = y[it.lane] + (row - barH) / 2;
-    const g = s("g", { class: "hit", tabindex: 0, "data-key": it.key });
+    const g = s("g", { class: "hit", tabindex: 0, "data-key": prefix + it.key });
     const xs = x(it.start), xe = x(it.end), w = Math.max(2, xe - xs - 2);
     if (it.phase === "predicted") {
       g.append(s("rect", { class: "mark", x: xs + 1, y: by + 0.75, width: Math.max(2, w - 0.5), height: barH - 1.5, rx: 4, fill: c, "fill-opacity": 0.16, stroke: c, "stroke-width": 1.5 }));
@@ -362,11 +365,11 @@ function renderTimeline() {
     }
     // a hit area taller than the bar
     g.append(s("rect", { x: xs, y: y[it.lane] + 2, width: Math.max(8, (it.est ? x(it.est) : xe) - xs), height: row - 4, fill: "transparent" }));
-    g.addEventListener("pointermove", (e) => showTip(e, it));
+    g.addEventListener("pointermove", (e) => showTip(e, it, now));
     g.addEventListener("pointerleave", hideTip);
-    g.addEventListener("focus", (e) => { const r = e.target.getBoundingClientRect(); showTip({ clientX: r.left + 10, clientY: r.bottom }, it); });
+    g.addEventListener("focus", (e) => { const r = e.target.getBoundingClientRect(); showTip({ clientX: r.left + 10, clientY: r.bottom }, it, now); });
     g.addEventListener("blur", hideTip);
-    g.addEventListener("click", () => openDetail(it.key));
+    g.addEventListener("click", () => openDetail(prefix + it.key));
     marks.append(g);
   }
   svg.append(marks);
@@ -375,15 +378,15 @@ function renderTimeline() {
   box.replaceChildren(svg);
   // legend: every project on screen
   const projects = [...new Set(all.filter((i) => i.end >= t0 && i.start <= t1).map((i) => (i.owner && i.owner.project) || ""))].sort();
-  $("#legend").replaceChildren(
+  legend.replaceChildren(
     ...projects.map((p) => h("span", {}, h("i", { class: "sw", style: `background:${colorOf(p)}` }), p || "unknown")),
     h("span", {}, h("i", { class: "key-run", style: "background:var(--ink-2)" }), "ran"),
     h("span", {}, h("i", { class: "key-est" }), "estimated"));
 }
 
 // ---------- tooltip ----------
-function tipRows(it) {
-  const now = S.now, rows = [];
+function tipRows(it, now) {
+  const rows = [];
   rows.push(h("div", { class: "v mono" }, it.label || "job"));
   rows.push(h("div", {}, ownerName(it.owner), it.owner && it.owner.worktree ? h("span", { class: "k" }, " · " + it.owner.worktree) : null));
   if (it.phase === "done") {
@@ -400,8 +403,8 @@ function tipRows(it) {
   if (e) rows.push(h("div", { class: "k" }, estimateText(e)));
   return rows;
 }
-function showTip(ev, it) {
-  const t = $("#tip"); t.replaceChildren(...tipRows(it)); t.hidden = false;
+function showTip(ev, it, now) {
+  const t = $("#tip"); t.replaceChildren(...tipRows(it, now)); t.hidden = false;
   const r = t.getBoundingClientRect();
   t.style.left = Math.min(ev.clientX + 14, innerWidth - r.width - 8) + "px";
   t.style.top = Math.min(ev.clientY + 14, innerHeight - r.height - 8) + "px";
@@ -608,16 +611,30 @@ function renderOutside() {
   $("#outside").replaceChildren(jobs.length ? jobsTable(jobs, S.now, (j) => `outside:${j.pid}`, null)
     : h("div", { class: "muted" }, "Nothing heavy outside the gate."), dockerNote(S.docker_error) || "");
 }
+// Its lockview's slots and locks over time, as the probe relays them. draws: where to put what draws it, once it
+// is on the page, as drawing needs its width.
+function remoteTimeline(hs, draws) {
+  const tl = hs.timeline;
+  if (!tl) return h("div", { class: "muted remote-timeline" }, hs.timeline_error ? `Its slots and locks over time can't be shown: ${hs.timeline_error}`
+    : h("span", {}, "Its slots and locks over time show here while lockview serves there too: ", h("span", { class: "mono" }, "lockview --serve"), "."));
+  if (!lanes(tl).length) return h("div", { class: "muted remote-timeline" }, "No gate slots or locks there.");
+  const legend = h("div", { class: "legend" }), box = h("div", { class: "timeline" });
+  draws.push(() => renderTimeline(box, legend, tl, `at:${hs.alias}:`, hs.alias));
+  return h("div", { class: "remote-timeline" }, h("div", { class: "remote-timeline-head" }, h("span", { class: "muted" }, "Slots and locks over time"),
+    h("div", { class: "spacer" }), legend), box);
+}
 function renderRemotes() {
-  const R = S.remotes, box = $("#remotes");
+  const R = S.remotes, box = $("#remotes"), draws = [];
   if (!R.hosts.length) { box.replaceChildren(h("div", { class: "muted" }, "None. List their ssh aliases as ", h("span", { class: "mono" }, "hosts"), " under ", h("span", { class: "mono" }, "[remote]"), " in ", h("span", { class: "mono" }, R.config), ", and reopen the app.")); return; }
   box.replaceChildren(...R.hosts.map((hs) => {
     const [cls, text] = remoteState(hs), r = hs.reading;
     const head = h("div", { class: "remote-head" }, h("h3", { class: "mono" }, hs.alias), r && r.host !== hs.alias ? h("span", { class: "muted mono" }, r.host) : null,
       h("span", { class: cls ? `status ${cls}` : "muted" }, text), hs.error && cls !== "good" ? h("span", { class: "muted mono" }, hs.error) : null,
       r && r.sessions.length ? h("span", { class: "muted", title: r.sessions.join(", ") }, `${r.sessions.length} Claude session${r.sessions.length > 1 ? "s" : ""} there`) : null);
-    return h("div", { class: "remote" + (r && cls !== "good" ? " stale-host" : "") }, head, r ? remoteTiles(r) : null, r ? remoteJobs(hs) : null);
+    return h("div", { class: "remote" + (r && cls !== "good" ? " stale-host" : "") }, head, r ? remoteTiles(r) : null,
+      r ? remoteTimeline(hs, draws) : null, r ? remoteJobs(hs) : null);
   }));
+  for (const draw of draws) draw();
 }
 function renderLocks() {
   const now = S.now, box = $("#locks");
@@ -725,13 +742,22 @@ function renderCapacity() {
 }
 
 // ---------- detail panel ----------
-function findItem(key) {
+// st: the state an item of the timeline is in, this machine's or another's.
+function findItem(key, st = S) {
   const [kind] = key.split(":");
-  if (kind === "gate") { const g = S.gate.gates.find((g) => `gate:${g.pid}` === key); return g && { kind, g }; }
-  if (kind === "hist") { const r = S.history.find((r) => `hist:${r.unit}:${r.start}` === key); return r && { kind, r }; }
-  if (kind === "lock") { for (const lk of S.locks) for (const p of [...lk.holders, ...lk.waiters]) if (`lock:${lk.path}:${p.pid}` === key) return { kind, lk, p }; }
+  if (kind === "gate") { const g = st.gate.gates.find((g) => `gate:${g.pid}` === key); return g && { kind, g }; }
+  if (kind === "hist") { const r = st.history.find((r) => `hist:${r.unit}:${r.start}` === key); return r && { kind, r }; }
+  if (kind === "lock") { for (const lk of st.locks) for (const p of [...lk.holders, ...lk.waiters]) if (`lock:${lk.path}:${p.pid}` === key) return { kind, lk, p }; }
   if (kind === "outside") { const j = (S.outside || []).find((j) => `outside:${j.pid}` === key); return j && { kind, j }; }
   if (kind === "remote") { for (const hs of S.remotes.hosts) for (const j of (hs.reading && hs.reading.jobs) || []) if (`remote:${hs.alias}:${j.pid}` === key) return { kind, hs, j }; }
+  if (kind === "at") {  // in another machine's timeline
+    for (const hs of S.remotes.hosts) {
+      const prefix = `at:${hs.alias}:`;
+      if (!hs.timeline || !key.startsWith(prefix)) continue;
+      const it = findItem(key.slice(prefix.length), hs.timeline);
+      return it && { ...it, host: hs, st: hs.timeline };
+    }
+  }
   return null;
 }
 function openDetail(key) { detailKey = key; renderDetail(); }
@@ -739,8 +765,9 @@ function renderDetail() {
   const a = $("#detail");
   const it = detailKey && S && findItem(detailKey);
   if (!it) { a.hidden = true; return; }
-  const now = S.now, dl = [];
+  const now = (it.st || S).now, dl = [];
   const row = (k, v) => { if (v != null && v !== "") dl.push(h("dt", {}, k), h("dd", {}, v)); };
+  if (it.host) row("Machine", it.host.alias);
   let title = "", command = "";
   if (it.kind === "gate") {
     const g = it.g; title = g.label; command = g.command.join(" ");
@@ -823,10 +850,10 @@ function render() {
   if (!S) return;
   renderBanners();
   if (S.error) return;
-  renderTiles(); renderTimeline(); renderQueue(); renderOutside(); renderRemotes(); renderLocks(); renderHistory(); renderCapacity(); renderDetail();
+  renderTiles(); renderTimeline($("#timeline"), $("#legend"), S, ""); renderQueue(); renderOutside(); renderRemotes(); renderLocks(); renderHistory(); renderCapacity(); renderDetail();
 }
 renderRange(); renderCapRange(); applyTheme();
-window.addEventListener("resize", () => S && !S.error && renderTimeline());
+window.addEventListener("resize", () => { if (S && !S.error) { renderTimeline($("#timeline"), $("#legend"), S, ""); renderRemotes(); } });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
 poll(); setInterval(poll, 3000); setInterval(updateStatus, 1000);
 </script>

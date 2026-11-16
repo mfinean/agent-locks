@@ -2,8 +2,9 @@
 
 For each host a thread keeps one ssh connection open (BatchMode, so it never prompts). It sends
 probe.py as python3's program on stdin, and the probe prints a JSON line of the host's readings
-every interval: RAM, memory pressure, GPUs, CPU and its heavy jobs. A connection that fails is
-retried, 5 s later at first and then up to every minute.
+every interval: RAM, memory pressure, GPUs, CPU and its heavy jobs; and, if lockview serves there
+too, every so often its timeline of slots and locks. A connection that fails is retried, 5 s later at
+first and then up to every minute.
 
 Who started a remote job: the Claude session there that it runs under, or else the ssh client here
 whose connection started it. sshd puts the client's address and port in SSH_CONNECTION, and the
@@ -51,6 +52,8 @@ class Host:
         self.received = 0.0  # when the reading arrived
         self.connected = False
         self.error = ""
+        self.timeline: dict | None = None  # the last that the probe relayed, from the lockview serving there
+        self.timeline_error = ""
 
     def start(self) -> None:
         threading.Thread(target=self.run, daemon=True, name=f"remote:{self.alias}").start()
@@ -80,6 +83,8 @@ class Host:
                 reading = json.loads(line)
             except ValueError:
                 continue
+            if "timeline" in reading:
+                self.timeline, self.timeline_error = reading.pop("timeline"), reading.pop("timeline_error", "")
             self.reading, self.received, self.connected, self.error, got = reading, time.time(), True, "", True
         self.connected = False
         code = p.wait()
@@ -89,7 +94,8 @@ class Host:
 
     def as_dict(self, now: float, clients: dict[tuple, Client]) -> dict:
         out = {"alias": self.alias, "connected": self.connected, "error": self.error,
-               "age": now - self.received if self.received else None, "reading": None}
+               "age": now - self.received if self.received else None, "reading": None,
+               "timeline": self.timeline, "timeline_error": self.timeline_error}
         if self.reading:
             r = dict(self.reading)
             r["jobs"] = [_job(j, r.get("home", ""), self.alias, clients, now) for j in r.get("jobs", [])]

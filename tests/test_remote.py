@@ -1,6 +1,9 @@
+import json
 import os
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -190,7 +193,7 @@ def test_a_host_that_cannot_be_reached_says_why():
     h = remote.Host("nope", 3, command=[sys.executable, "-c", fail])
     assert not h.connect()
     assert h.as_dict(time.time(), {}) == {"alias": "nope", "connected": False, "error": "ssh: Could not resolve hostname nope",
-                                          "age": None, "reading": None}
+                                          "age": None, "reading": None, "timeline": None, "timeline_error": ""}
 
 
 WRAPPED = ("/bin/bash -c source /home/u/.claude/shell-snapshots/snapshot-bash-1-x.sh 2>/dev/null || true && "
@@ -254,3 +257,73 @@ def test_ssh_clients_are_found_by_their_sockets_and_remembered_for_a_day(tmp_pat
     assert (ME, 49460) in r.clients
     r.note_clients(snap, {}, 1000.0 + remote.KEEP)
     assert r.clients == {}
+
+
+def _serve_timeline(body: bytes) -> ThreadingHTTPServer:
+    """A stand-in for lockview's server, which answers /api/timeline with body."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/api/timeline" else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def _stop(httpd: ThreadingHTTPServer) -> None:
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _announce(d: Path, pid: int, start: int, port: int) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{pid}.json").write_text(json.dumps({"pid": pid, "start": start, "port": port}))
+
+
+def test_the_probe_relays_the_timeline_of_the_lockview_serving_there(tmp_path):
+    httpd = _serve_timeline(b'{"now": 5, "history": []}')
+    try:
+        _announce(tmp_path, 42, 1000, 1)  # a lockview that has exited: pid 42 now runs something else
+        _announce(tmp_path, 43, 2000, httpd.server_address[1])
+        assert probe.lockview_timeline({42: {"start": 999}, 43: {"start": 2000}}, str(tmp_path)) == ({"now": 5, "history": []}, "")
+    finally:
+        _stop(httpd)
+
+
+def test_with_no_lockview_serving_there_the_probe_relays_no_timeline(tmp_path):
+    assert probe.lockview_timeline({}, str(tmp_path / "none")) == (None, "")
+    _announce(tmp_path, 42, 1000, 1)
+    assert probe.lockview_timeline({}, str(tmp_path)) == (None, "")
+    assert probe.lockview_timeline({42: {"start": 1001}}, str(tmp_path)) == (None, "")
+
+
+def test_the_probe_says_why_it_got_no_timeline(tmp_path):
+    httpd = _serve_timeline(json.dumps({"error": "Traceback …\nKeyError: 'x'\n", "now": 1}).encode())
+    _announce(tmp_path, 43, 2000, httpd.server_address[1])
+    try:
+        assert probe.lockview_timeline({43: {"start": 2000}}, str(tmp_path)) == (None, "lockview there failed: KeyError: 'x'")
+    finally:
+        _stop(httpd)
+    timeline, error = probe.lockview_timeline({43: {"start": 2000}}, str(tmp_path))
+    assert timeline is None and error.startswith(f"lockview there didn't answer on port {httpd.server_address[1]}: ")
+
+
+def test_a_host_relays_the_timeline_of_the_lockview_serving_there_and_keeps_it_between_relays(tmp_path):
+    httpd = _serve_timeline(b'{"now": 5}')
+    try:
+        _announce(tmp_path / "lockview" / "serving", os.getpid(), procs.read_stat(os.getpid())[2], httpd.server_address[1])
+        command = ["env", f"XDG_STATE_HOME={tmp_path}", "timeout", "1.5", sys.executable, "-u", "-", "0.2"]
+        h = remote.Host("here", 0.2, command=command)
+        assert h.connect()
+        r = h.as_dict(time.time(), {})
+    finally:
+        _stop(httpd)
+    assert r["timeline"] == {"now": 5} and r["timeline_error"] == ""
+    assert "timeline" not in r["reading"]  # the last reading came after the relay, and lacks one

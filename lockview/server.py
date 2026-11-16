@@ -1,7 +1,9 @@
 """The sampler (every few seconds: gate, locks, journal) and a localhost HTTP server.
 
-GET /            the page (web/index.html)
-GET /api/state   the latest sample as JSON
+GET /               the page (web/index.html)
+GET /api/state      the latest sample as JSON
+GET /api/timeline   the part of it the timeline draws, which other machines' lockview relays (probe.py); the
+                    server says on which port it listens in ~/.local/state/lockview/serving/<pid>.json
 
 History comes from the gate's event log, joined with the journal (runs.py). Neither knows which
 session started a job, nor which lock a `flock … systemd-run` scope ran under; the sampler sees
@@ -267,6 +269,37 @@ def lock_rows(lks: list[locks.Lock], est: estimate.Estimator | None, now: float)
     return out
 
 
+def timeline(state: dict) -> dict:
+    """The part of a sample that the page's timeline draws: a failed sample's is its error."""
+    if "error" in state:
+        return state
+    return {"now": state["now"], "gate": {"slots": state["gate"]["slots"], "gates": state["gate"]["gates"]},
+            "locks": state["locks"], "history": state["history"]}
+
+
+def _encode(state: dict) -> tuple[bytes, bytes]:
+    """A sample's body for /api/state and for /api/timeline."""
+    return json.dumps(state, default=str).encode(), json.dumps(timeline(state), default=str).encode()
+
+
+def announce(port: int, directory: Path) -> None:
+    """Say on which port this server listens, in <pid>.json, with this process's start to tell a reused pid; and
+    remove what servers that have since exited said."""
+    for f in directory.glob("*.json"):
+        try:
+            d = json.loads(f.read_text())
+            alive = procs.read_stat(d["pid"])[2] == d["start"]
+        except (OSError, ValueError, KeyError, TypeError):
+            alive = False
+        if not alive:
+            f.unlink(missing_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    tmp = directory / f"{pid}.tmp"
+    tmp.write_text(json.dumps({"pid": pid, "start": procs.read_stat(pid)[2], "port": port}))
+    tmp.replace(directory / f"{pid}.json")
+
+
 class Sampler:
     def __init__(self, interval: float = 3.0, journal_every: float = 20.0):
         self.interval = interval
@@ -286,7 +319,7 @@ class Sampler:
         self.estimator: estimate.Estimator | None = None
         self.capacity: dict[int, dict] = {}
         self._journal_at = 0.0
-        self.body = b"{}"
+        self.body = self.timeline_body = b"{}"
         self.lock = threading.Lock()
         self.oomd = resources.oomd_policy(os.getuid())
         self.gpu_idle_since: dict[int, float] = {}  # gate pid -> since when its job has had no work on the GPU
@@ -368,11 +401,12 @@ class Sampler:
     def run(self) -> None:
         while True:
             try:
-                body = json.dumps(self.sample(), default=str).encode()
+                bodies = _encode(self.sample())
             except Exception:  # keep the page alive and say what broke, rather than freeze on a stale sample
-                body = json.dumps({"error": traceback.format_exc(), "now": time.time()}).encode()
+                error = json.dumps({"error": traceback.format_exc(), "now": time.time()}).encode()
+                bodies = error, error
             with self.lock:
-                self.body = body
+                self.body, self.timeline_body = bodies
             time.sleep(self.interval)
 
 
@@ -381,9 +415,9 @@ def make_handler(sampler: Sampler):
         def do_GET(self):
             if self.path in ("/", "/index.html"):
                 self._send(200, "text/html; charset=utf-8", (WEB / "index.html").read_bytes())
-            elif self.path == "/api/state":
+            elif self.path in ("/api/state", "/api/timeline"):
                 with sampler.lock:
-                    body = sampler.body
+                    body = sampler.body if self.path == "/api/state" else sampler.timeline_body
                 self._send(200, "application/json", body)
             else:
                 self._send(404, "text/plain", b"not found")
@@ -406,8 +440,9 @@ def start(port: int = 0, interval: float = 3.0) -> tuple[ThreadingHTTPServer, Sa
     sampler = Sampler(interval)
     sampler.remotes.start()
     with sampler.lock:
-        sampler.body = json.dumps(sampler.sample(), default=str).encode()
+        sampler.body, sampler.timeline_body = _encode(sampler.sample())
     threading.Thread(target=sampler.run, daemon=True, name="sampler").start()
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sampler))  # port 0: any free one
     threading.Thread(target=httpd.serve_forever, daemon=True, name="http").start()
+    announce(httpd.server_address[1], STATE_DIR / "serving")
     return httpd, sampler
